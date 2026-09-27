@@ -1,0 +1,5 @@
+/target
+.DS_Store
+# generated benchmark datasets and sidecars never belong in the repo
+/bench/data/
+*.gridsift-index

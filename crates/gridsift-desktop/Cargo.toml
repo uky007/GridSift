@@ -1,0 +1,22 @@
+[package]
+name = "gridsift-desktop"
+description = "gridsift desktop application (egui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "gridsift-desktop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+eframe = "0.32.3"
+egui = "0.32.3"
+egui_extras = "0.32.3"
+gridsift-core = { path = "../gridsift-core" }
+rfd = "0.17.2"

@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/uky/gridsift"
+keywords = ["csv", "dfir", "forensics", "large-files", "offline"]
+categories = ["command-line-utilities", "parsing"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = 1          # keep line tables for profiling
+
+[profile.bench]
+inherits = "release"
