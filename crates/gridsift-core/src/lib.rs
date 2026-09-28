@@ -18,6 +18,7 @@
 //! - [`frequency`] parallel top-N value counts for a column
 //! - [`semantic`] semantic column typing (ip, domain, hash, timestamp, …)
 //! - [`manifest`] provenance manifest written next to every export
+//! - [`redact`]  export-time column redaction (drop / mask / partial / ip prefix / hmac)
 //! - [`hash`]    streaming SHA-256 / BLAKE3
 //! - [`sidecar`] where derived files (indexes) are stored
 //! - [`synth`]   deterministic synthetic datasets for benchmarks
@@ -31,6 +32,7 @@ pub mod index;
 pub mod manifest;
 pub mod reader;
 pub mod record;
+pub mod redact;
 pub mod scan;
 pub mod search;
 pub mod semantic;

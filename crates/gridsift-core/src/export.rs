@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::hash::{Digests, HashSelection, MultiHasher};
 use crate::index::SparseIndex;
 use crate::reader::{locate_many, stream_records};
+use crate::redact::Redactor;
 use crate::scan::Control;
 use crate::search::MatchSet;
 use crate::source::Source;
@@ -72,6 +73,8 @@ pub struct ExportOptions<'a> {
     pub chunk_size: usize,
     /// Overwrite an existing output file.
     pub overwrite: bool,
+    /// Column redaction to apply to every written record (and the header).
+    pub redactor: Option<&'a Redactor>,
     pub cancel: Option<&'a AtomicBool>,
 }
 
@@ -83,9 +86,28 @@ impl Default for ExportOptions<'_> {
             hash: HashSelection::SHA256,
             chunk_size: 8 << 20,
             overwrite: false,
+            redactor: None,
             cancel: None,
         }
     }
+}
+
+/// Write one record (redacted if asked) plus the terminator.
+fn emit<W: Write>(
+    w: &mut Tee<W>,
+    redactor: Option<&Redactor>,
+    buf: &mut Vec<u8>,
+    bytes: &[u8],
+    term: &[u8],
+) -> io::Result<()> {
+    match redactor {
+        Some(r) => {
+            r.render(bytes, buf);
+            w.put(buf)?;
+        }
+        None => w.put(bytes)?,
+    }
+    w.put(term)
 }
 
 #[derive(Clone, Debug)]
@@ -137,11 +159,19 @@ pub fn export(
     };
     let term = opts.terminator.bytes();
     let mut records = 0u64;
+    let redactor = opts.redactor;
+    let mut rbuf: Vec<u8> = Vec::new();
 
     let result = (|| -> io::Result<bool> {
         if opts.include_header {
             if let Some(h) = index.header {
-                w.put(source.slice(h.start, h.end))?;
+                match redactor {
+                    Some(r) => {
+                        r.render_header(source.slice(h.start, h.end), &mut rbuf);
+                        w.put(&rbuf)?;
+                    }
+                    None => w.put(source.slice(h.start, h.end))?,
+                }
                 w.put(term)?;
             }
         }
@@ -159,7 +189,7 @@ pub fn export(
                     opts.chunk_size,
                     opts.cancel,
                     &mut |sp, bytes| {
-                        if let Err(e) = w.put(bytes).and_then(|_| w.put(term)) {
+                        if let Err(e) = emit(&mut w, redactor, &mut rbuf, bytes, term) {
                             err = Some(e);
                             return Control::Stop;
                         }
@@ -194,7 +224,7 @@ pub fn export(
                             return Control::Stop;
                         }
                         if sp.ordinal >= first {
-                            if let Err(e) = w.put(bytes).and_then(|_| w.put(term)) {
+                            if let Err(e) = emit(&mut w, redactor, &mut rbuf, bytes, term) {
                                 err = Some(e);
                                 return Control::Stop;
                             }
@@ -226,8 +256,7 @@ pub fn export(
                     }
                     let mut last_end = 0;
                     for r in locate_many(source, index, &batch) {
-                        w.put(r.raw(source))?;
-                        w.put(term)?;
+                        emit(&mut w, redactor, &mut rbuf, r.raw(source), term)?;
                         records += 1;
                         last_end = r.end;
                     }

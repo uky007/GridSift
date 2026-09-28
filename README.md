@@ -83,6 +83,32 @@ source identity (size, mtime, SHA-256), the parser settings, the query that
 produced the selection, and the output's own SHA-256. It refuses to write
 onto the source. `verify` recomputes both digests.
 
+### Redaction
+
+Columns can be redacted on the way out, per column:
+
+```
+gridsift export proxy.csv -o shareable.csv -s '/c2/beacon' \
+    --redact user=hmac --redact src_ip=ip:16 --redact user_agent=drop \
+    --redact email=mask --redact sha256=partial:8 --hmac-key-file key.txt
+```
+
+| method | effect |
+|---|---|
+| `drop` | the column disappears (header too) |
+| `mask[:TEXT]` | every non-empty value becomes `TEXT` (default `[REDACTED]`) |
+| `partial[:N]` | first `N` characters kept, the rest `*` |
+| `ip[:BITS]` | host bits zeroed: `10.1.243.150` → `10.1.0.0` for 16; non-IPs are masked |
+| `hmac[:LEN]` | deterministic pseudonym: `LEN` hex chars of HMAC-SHA256(key, value) |
+
+Untouched columns keep their exact bytes. The manifest records the policy
+(columns, methods, parameters) and, for `hmac`, a fingerprint of the key —
+never the key itself — so a later export can be checked for having used the
+same key. HMAC pseudonyms preserve correlation across rows and files, which
+is the point; they are not an anonymity guarantee against anyone who can
+enumerate candidate values. The desktop app has the same options in its
+Export dialog.
+
 The desktop app and the CLI share the index sidecar (stored under the user
 cache directory, never next to the evidence), so a file indexed by one opens
 instantly in the other.

@@ -108,6 +108,10 @@ cache-resident — needs, and it keeps RSS at a few MiB per thread.
 output; a single appended byte on an output is reported as a mismatch (exit
 code 1).
 
+With five redaction rules (hmac, ip prefix, drop, partial, mask) the same
+483,485-record export took 1.45 s: rewritten fields cost about 2.5× the
+raw copy.
+
 ### Profile
 
 `gridsift profile` on the 1 GiB `narrow` file: 2,048 rows sampled from the

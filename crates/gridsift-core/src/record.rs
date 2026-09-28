@@ -33,6 +33,25 @@ pub fn split_fields<'a>(
     }
 }
 
+/// Raw extent `(start, end)` of every field, quotes included, so a record
+/// can be rewritten field by field while untouched fields keep their exact
+/// bytes.
+pub fn field_spans(raw: &[u8], delimiter: u8, quote: Option<u8>, out: &mut Vec<(usize, usize)>) {
+    out.clear();
+    let n = raw.len();
+    let mut i = 0usize;
+    loop {
+        let end = skip_field(raw, i, delimiter, quote);
+        out.push((i, end));
+        i = end;
+        if i < n && raw[i] == delimiter {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+}
+
 /// The `k`-th field (0-based) of `raw`, or `None` if the record has fewer
 /// fields. Earlier fields are skipped without being materialised.
 pub fn nth_field(raw: &[u8], delimiter: u8, quote: Option<u8>, k: usize) -> Option<Cow<'_, [u8]>> {
@@ -193,6 +212,40 @@ mod tests {
             out.into_iter().map(|c| c.into_owned()).collect::<Vec<_>>(),
             v(&["\"a\"", "b"])
         );
+    }
+
+    #[test]
+    fn field_spans_cover_the_record() {
+        let cases: &[&[u8]] = &[
+            b"a,b,c",
+            b"",
+            b",",
+            b"a,",
+            b"\"a,b\",c",
+            b"\"a\"\"b\",c,\"\"",
+            b"\"a\"b,c",
+            b"\"unterminated,x",
+        ];
+        for raw in cases {
+            let mut spans = Vec::new();
+            field_spans(raw, b',', Some(b'"'), &mut spans);
+            let mut all = Vec::new();
+            split_fields(raw, b',', Some(b'"'), &mut all);
+            assert_eq!(spans.len(), all.len(), "{:?}", String::from_utf8_lossy(raw));
+            // spans tile the record, separated by single delimiters
+            let mut expect = 0;
+            for (s, e) in &spans {
+                assert_eq!(*s, expect);
+                expect = e + 1;
+            }
+            assert_eq!(expect, raw.len() + 1);
+            // an unquoted field's span is its value
+            for ((s, e), v) in spans.iter().zip(&all) {
+                if !raw[*s..*e].starts_with(b"\"") {
+                    assert_eq!(&raw[*s..*e], v.as_ref());
+                }
+            }
+        }
     }
 
     #[test]

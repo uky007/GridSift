@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dialect::Dialect;
 use crate::hash::{Digests, hex};
+use crate::redact::RedactionPolicy;
 use crate::search::SearchQuery;
 use crate::source::{Source, SourceId};
 use crate::sys::{iso8601_utc, now_iso8601};
@@ -115,6 +116,8 @@ impl From<Dialect> for DialectInfo {
 pub enum Operation {
     /// A search whose matching records form the selection.
     Search { query: SearchQuery, matches: u64 },
+    /// Column redaction applied to the output (no secrets recorded).
+    Redact { policy: RedactionPolicy },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

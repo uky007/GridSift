@@ -19,6 +19,9 @@ use gridsift_core::hash::{MultiHasher, hash_source, hex};
 use gridsift_core::index::{BuildOptions, IndexParams, SparseIndex, bootstrap, build_index};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
 use gridsift_core::reader::{header_fields, locate_many, locate_records};
+use gridsift_core::redact::{
+    DEFAULT_HMAC_LENGTH, DEFAULT_MASK, RedactMethod, RedactRule, Redactor,
+};
 use gridsift_core::search::MatchSet;
 use gridsift_core::search::{PatternKind, SearchOptions, SearchQuery, SearchShared, search};
 use gridsift_core::semantic::{ProfileOptions, profile as profile_columns};
@@ -168,6 +171,14 @@ enum Cmd {
         /// Index to use (default: the user cache directory)
         #[arg(long)]
         index: Option<PathBuf>,
+        /// Redact a column: `COLUMN=drop`, `COLUMN=mask[:TEXT]`,
+        /// `COLUMN=partial[:KEEP]`, `COLUMN=ip[:BITS]`, `COLUMN=hmac[:LENGTH]`;
+        /// repeatable
+        #[arg(long)]
+        redact: Vec<String>,
+        /// File holding the HMAC key for `hmac` redactions (or set GRIDSIFT_HMAC_KEY)
+        #[arg(long)]
+        hmac_key_file: Option<PathBuf>,
     },
     /// Verify an exported file (and its source, if present) against its manifest
     Verify {
@@ -378,6 +389,8 @@ fn main() {
             force,
             threads,
             index,
+            redact,
+            hmac_key_file,
         } => cmd_export(
             &file,
             &dialect,
@@ -394,6 +407,8 @@ fn main() {
                 force,
                 threads,
                 index_path: index,
+                redact,
+                hmac_key_file,
             },
             json,
         ),
@@ -1252,6 +1267,70 @@ struct ExportArgs {
     force: bool,
     threads: usize,
     index_path: Option<PathBuf>,
+    redact: Vec<String>,
+    hmac_key_file: Option<PathBuf>,
+}
+
+/// Parse `COLUMN=METHOD[:PARAM]` into a rule.
+fn parse_redact_spec(spec: &str, header: Option<&[Cow<'_, [u8]>]>) -> Result<RedactRule> {
+    let (col, rest) = spec
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("--redact expects COLUMN=METHOD[:PARAM], got {spec:?}"))?;
+    let column = resolve_columns(&[col.to_string()], header)?
+        .and_then(|c| c.first().copied())
+        .expect("one column");
+    let name = header
+        .and_then(|h| h.get(column))
+        .map(|f| field_str(f).into_owned())
+        .unwrap_or_else(|| format!("col{column}"));
+    let (method, param) = match rest.split_once(':') {
+        Some((m, p)) => (m, Some(p)),
+        None => (rest, None),
+    };
+    let method = match method {
+        "drop" => RedactMethod::Drop,
+        "mask" => RedactMethod::Mask {
+            replacement: param.unwrap_or(DEFAULT_MASK).to_string(),
+        },
+        "partial" => RedactMethod::Partial {
+            keep: param
+                .map_or(Ok(3), str::parse)
+                .context("partial:KEEP must be a number")?,
+            fill: '*',
+        },
+        "ip" => RedactMethod::IpPrefix {
+            bits: param
+                .map_or(Ok(24), str::parse)
+                .context("ip:BITS must be a number")?,
+        },
+        "hmac" => RedactMethod::Hmac {
+            length: param
+                .map_or(Ok(DEFAULT_HMAC_LENGTH), str::parse)
+                .context("hmac:LENGTH must be a number")?,
+            key_fingerprint: String::new(),
+        },
+        other => bail!("unknown redaction method {other:?} (drop, mask, partial, ip, hmac)"),
+    };
+    Ok(RedactRule {
+        column,
+        name,
+        method,
+    })
+}
+
+/// The HMAC key from `--hmac-key-file` or `GRIDSIFT_HMAC_KEY`, if any.
+fn hmac_key(file: Option<&Path>) -> Result<Option<Vec<u8>>> {
+    if let Some(p) = file {
+        let mut k = fs::read(p).with_context(|| format!("reading HMAC key {}", p.display()))?;
+        while k.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
+            k.pop();
+        }
+        return Ok(Some(k));
+    }
+    Ok(
+        std::env::var_os("GRIDSIFT_HMAC_KEY")
+            .map(|v| v.to_string_lossy().into_owned().into_bytes()),
+    )
 }
 
 fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Result<()> {
@@ -1329,6 +1408,22 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         (None, None) => (Selection::All, SelectionInfo::All, idx.stats.records),
     };
 
+    let redactor = if o.redact.is_empty() {
+        None
+    } else {
+        let rules = o
+            .redact
+            .iter()
+            .map(|s| parse_redact_spec(s, header.as_deref()))
+            .collect::<Result<Vec<_>>>()?;
+        let key = hmac_key(o.hmac_key_file.as_deref())?;
+        let r = Redactor::new(idx.params.dialect, rules, key.as_deref())
+            .map_err(|e| anyhow::anyhow!("redaction: {e}"))?;
+        operations.push(Operation::Redact {
+            policy: r.policy().clone(),
+        });
+        Some(r)
+    };
     let terminator = if o.crlf {
         Terminator::Crlf
     } else {
@@ -1339,6 +1434,7 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         terminator,
         hash: HashSelection::SHA256,
         overwrite: o.force,
+        redactor: redactor.as_ref(),
         ..ExportOptions::default()
     };
     let pb = progress_bar(expected, json);
@@ -1366,7 +1462,12 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             format: "csv".into(),
-            content: "raw-records".into(),
+            content: if redactor.is_some() {
+                "records-redacted"
+            } else {
+                "raw-records"
+            }
+            .into(),
             header: !o.omit_header && idx.header.is_some(),
             terminator: String::from_utf8_lossy(terminator.bytes()).into_owned(),
             records: rep.records,
@@ -1486,6 +1587,27 @@ fn cmd_verify(
         );
         for op in &m.operations {
             match op {
+                Operation::Redact { policy } => {
+                    for r in &policy.rules {
+                        let how = match &r.method {
+                            RedactMethod::Drop => "dropped".to_string(),
+                            RedactMethod::Mask { replacement } => {
+                                format!("masked as {replacement:?}")
+                            }
+                            RedactMethod::Partial { keep, fill } => {
+                                format!("first {keep} chars kept, rest {fill:?}")
+                            }
+                            RedactMethod::IpPrefix { bits } => format!("ip truncated to /{bits}"),
+                            RedactMethod::Hmac {
+                                length,
+                                key_fingerprint,
+                            } => {
+                                format!("hmac-sha256[{length}] with key {key_fingerprint}")
+                            }
+                        };
+                        println!("            redact {} (column {}): {how}", r.name, r.column);
+                    }
+                }
                 Operation::Search { query, matches } => println!(
                     "            search {:?}{}{}{} → {} matches",
                     query.pattern,

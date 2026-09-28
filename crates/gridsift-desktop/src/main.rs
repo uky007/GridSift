@@ -26,6 +26,9 @@ use gridsift_core::hash::hex;
 use gridsift_core::index::{BuildOptions, IndexParams, SparseIndex, bootstrap, build_index};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
 use gridsift_core::reader::{header_fields, locate_many, locate_records};
+use gridsift_core::redact::{
+    DEFAULT_HMAC_LENGTH, DEFAULT_MASK, RedactMethod, RedactRule, Redactor,
+};
 use gridsift_core::search::{
     PatternKind, SearchOptions, SearchOutcome, SearchQuery, SearchShared, search,
 };
@@ -330,6 +333,114 @@ struct FreqView {
 }
 
 // ---------------------------------------------------------------------------
+// export dialog
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuleChoice {
+    Keep,
+    Drop,
+    Mask,
+    Partial,
+    Ip,
+    Hmac,
+}
+
+impl RuleChoice {
+    const ALL: [RuleChoice; 6] = [
+        RuleChoice::Keep,
+        RuleChoice::Drop,
+        RuleChoice::Mask,
+        RuleChoice::Partial,
+        RuleChoice::Ip,
+        RuleChoice::Hmac,
+    ];
+
+    fn label(&self) -> &'static str {
+        match self {
+            RuleChoice::Keep => "keep",
+            RuleChoice::Drop => "drop",
+            RuleChoice::Mask => "mask",
+            RuleChoice::Partial => "partial",
+            RuleChoice::Ip => "ip prefix",
+            RuleChoice::Hmac => "hmac",
+        }
+    }
+}
+
+/// State of the export dialog: what to export and how to redact it.
+struct ExportUi {
+    open: bool,
+    /// Export the matches of the current search rather than all records.
+    matches: bool,
+    /// One choice per column.
+    choices: Vec<RuleChoice>,
+    mask_text: String,
+    keep: usize,
+    bits: u8,
+    hmac_len: usize,
+    /// Kept in memory only; the manifest records a fingerprint.
+    hmac_key: String,
+    error: Option<String>,
+}
+
+impl Default for ExportUi {
+    fn default() -> Self {
+        ExportUi {
+            open: false,
+            matches: false,
+            choices: Vec::new(),
+            mask_text: DEFAULT_MASK.into(),
+            keep: 3,
+            bits: 24,
+            hmac_len: DEFAULT_HMAC_LENGTH,
+            hmac_key: String::new(),
+            error: None,
+        }
+    }
+}
+
+impl ExportUi {
+    fn show(&mut self, matches: bool, ncols: usize) {
+        self.open = true;
+        self.matches = matches;
+        self.error = None;
+        if self.choices.len() != ncols {
+            self.choices = vec![RuleChoice::Keep; ncols];
+        }
+    }
+
+    fn rules(&self, header: &[String]) -> Vec<RedactRule> {
+        self.choices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let method = match c {
+                    RuleChoice::Keep => return None,
+                    RuleChoice::Drop => RedactMethod::Drop,
+                    RuleChoice::Mask => RedactMethod::Mask {
+                        replacement: self.mask_text.clone(),
+                    },
+                    RuleChoice::Partial => RedactMethod::Partial {
+                        keep: self.keep,
+                        fill: '*',
+                    },
+                    RuleChoice::Ip => RedactMethod::IpPrefix { bits: self.bits },
+                    RuleChoice::Hmac => RedactMethod::Hmac {
+                        length: self.hmac_len,
+                        key_fingerprint: String::new(),
+                    },
+                };
+                Some(RedactRule {
+                    column: i,
+                    name: header.get(i).cloned().unwrap_or_else(|| format!("col{i}")),
+                    method,
+                })
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // document
 
 /// Decoded rows by record ordinal, filled in windows (contiguous view) or
@@ -423,6 +534,7 @@ struct Document {
     freq: Option<FreqView>,
     /// A value clicked in the count panel: (column, value) to filter by.
     pending_pivot: Option<(usize, String)>,
+    export_ui: ExportUi,
     /// Open → first rows on screen.
     first_rows_in: Duration,
     index_elapsed: Option<Duration>,
@@ -512,6 +624,7 @@ impl Document {
             freq_job: None,
             freq: None,
             pending_pivot: None,
+            export_ui: ExportUi::default(),
             first_rows_in,
             index_elapsed: None,
             index_from_sidecar: from_sidecar,
@@ -752,7 +865,13 @@ impl Document {
 
     /// Export the current view (matches when filtering, else all records)
     /// plus a provenance manifest, on a background thread.
-    fn start_export(&mut self, out: PathBuf) {
+    fn start_export(
+        &mut self,
+        out: PathBuf,
+        use_matches: bool,
+        rules: Vec<RedactRule>,
+        hmac_key: Option<Vec<u8>>,
+    ) {
         let index = match self.index.read() {
             Ok(i) if i.stats.complete && i.digests.sha256.is_some() => i.clone(),
             _ => {
@@ -761,7 +880,7 @@ impl Document {
             }
         };
         let (matches, operations): (Option<gridsift_core::search::MatchSet>, Vec<Operation>) =
-            match (&self.search, self.search_ui.filter) {
+            match (&self.search, use_matches) {
                 (Some(s), true) => {
                     let m = s.shared.matches.lock().expect("match set").clone();
                     let ops = vec![Operation::Search {
@@ -789,8 +908,23 @@ impl Document {
                     Some(m) => Selection::Matches(m),
                     None => Selection::All,
                 };
+                let redactor = if rules.is_empty() {
+                    None
+                } else {
+                    Some(
+                        Redactor::new(index.params.dialect, rules, hmac_key.as_deref())
+                            .map_err(|e| format!("redaction: {e}"))?,
+                    )
+                };
+                let mut operations = operations;
+                if let Some(r) = &redactor {
+                    operations.push(Operation::Redact {
+                        policy: r.policy().clone(),
+                    });
+                }
                 let opts = ExportOptions {
                     overwrite: true,
+                    redactor: redactor.as_ref(),
                     cancel: Some(&c2),
                     ..ExportOptions::default()
                 };
@@ -821,7 +955,12 @@ impl Document {
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_default(),
                         format: "csv".into(),
-                        content: "raw-records".into(),
+                        content: if redactor.is_some() {
+                            "records-redacted"
+                        } else {
+                            "raw-records"
+                        }
+                        .into(),
                         header: index.header.is_some(),
                         terminator: "\n".into(),
                         records: rep.records,
@@ -995,19 +1134,7 @@ impl eframe::App for App {
                             "available once indexing and any running export have finished",
                         );
                     if resp.clicked() {
-                        let stem = d
-                            .path
-                            .file_stem()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| "export".into());
-                        let suffix = if filtered { "matches" } else { "all" };
-                        if let Some(p) = rfd::FileDialog::new()
-                            .set_file_name(format!("{stem}-{suffix}.csv"))
-                            .add_filter("CSV", &["csv"])
-                            .save_file()
-                        {
-                            d.start_export(p);
-                        }
+                        d.export_ui.show(filtered, d.header.len());
                     }
                 }
                 ui.separator();
@@ -1078,6 +1205,7 @@ impl eframe::App for App {
 
         if let Some(d) = &mut self.doc {
             freq_panel(ctx, d);
+            export_window(ctx, d);
         }
 
         egui::CentralPanel::default()
@@ -1602,6 +1730,149 @@ fn freq_panel(ctx: &egui::Context, d: &mut Document) {
                 d.pending_pivot = clicked;
             }
         });
+}
+
+/// The export dialog: selection, per-column redaction, then the save dialog.
+fn export_window(ctx: &egui::Context, d: &mut Document) {
+    if !d.export_ui.open {
+        return;
+    }
+    let mut open = true;
+    let mut go = false;
+    let mut cancel = false;
+    egui::Window::new("Export")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(620.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let has_search = d.search.is_some();
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Records").weak());
+                ui.radio_value(&mut d.export_ui.matches, false, "all");
+                ui.add_enabled_ui(has_search, |ui| {
+                    ui.radio_value(
+                        &mut d.export_ui.matches,
+                        true,
+                        "matches of the current search",
+                    );
+                });
+            });
+            ui.separator();
+            ui.label(RichText::new("Redaction").strong());
+            ui.label(
+                RichText::new(
+                    "Untouched columns keep their exact bytes. Redacted columns are rewritten; \
+                     the manifest records the policy (never the key).",
+                )
+                .weak(),
+            );
+            egui::ScrollArea::vertical()
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("redact-grid")
+                        .num_columns(3)
+                        .spacing([12.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (i, name) in d.header.iter().enumerate() {
+                                ui.label(RichText::new(name).monospace());
+                                let typed = d
+                                    .profile
+                                    .as_ref()
+                                    .and_then(|p| p.column(i))
+                                    .map_or("", |c| c.detected.name());
+                                ui.label(RichText::new(typed).weak());
+                                if let Some(choice) = d.export_ui.choices.get_mut(i) {
+                                    egui::ComboBox::from_id_salt(("redact", i))
+                                        .selected_text(choice.label())
+                                        .width(110.0)
+                                        .show_ui(ui, |ui| {
+                                            for c in RuleChoice::ALL {
+                                                ui.selectable_value(choice, c, c.label());
+                                            }
+                                        });
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+            ui.separator();
+            egui::Grid::new("redact-params")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(RichText::new("mask text").weak());
+                    ui.text_edit_singleline(&mut d.export_ui.mask_text);
+                    ui.end_row();
+                    ui.label(RichText::new("partial: characters kept").weak());
+                    ui.add(egui::DragValue::new(&mut d.export_ui.keep).range(0..=64));
+                    ui.end_row();
+                    ui.label(RichText::new("ip prefix bits").weak());
+                    ui.add(egui::DragValue::new(&mut d.export_ui.bits).range(0..=128));
+                    ui.end_row();
+                    ui.label(RichText::new("hmac length (hex chars)").weak());
+                    ui.add(egui::DragValue::new(&mut d.export_ui.hmac_len).range(1..=64));
+                    ui.end_row();
+                    ui.label(RichText::new("hmac key").weak());
+                    ui.add(
+                        egui::TextEdit::singleline(&mut d.export_ui.hmac_key)
+                            .password(true)
+                            .desired_width(300.0)
+                            .hint_text("kept in memory only"),
+                    );
+                    ui.end_row();
+                });
+            if let Some(e) = &d.export_ui.error {
+                ui.colored_label(Color32::LIGHT_RED, e);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Choose file & export…").clicked() {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+    if !open || cancel {
+        d.export_ui.open = false;
+        return;
+    }
+    if !go {
+        return;
+    }
+    let rules = d.export_ui.rules(&d.header);
+    let needs_key = rules
+        .iter()
+        .any(|r| matches!(r.method, RedactMethod::Hmac { .. }));
+    let key = needs_key.then(|| d.export_ui.hmac_key.as_bytes().to_vec());
+    // validate now so mistakes show in the dialog, not after the file picker
+    if let Err(e) = Redactor::new(d.params.dialect, rules.clone(), key.as_deref()) {
+        d.export_ui.error = Some(e);
+        return;
+    }
+    let filtered = d.export_ui.matches && d.search.is_some();
+    let stem = d
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export".into());
+    let name = format!(
+        "{stem}-{}{}.csv",
+        if filtered { "matches" } else { "all" },
+        if rules.is_empty() { "" } else { "-redacted" }
+    );
+    if let Some(p) = rfd::FileDialog::new()
+        .set_file_name(name)
+        .add_filter("CSV", &["csv"])
+        .save_file()
+    {
+        d.export_ui.open = false;
+        d.export_ui.error = None;
+        d.start_export(p, filtered, rules, key);
+    }
 }
 
 fn row_number_width(total: usize) -> f32 {
