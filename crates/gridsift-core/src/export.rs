@@ -19,12 +19,34 @@ use crate::scan::Control;
 use crate::search::MatchSet;
 use crate::source::Source;
 
-/// Which records to export.
+/// Which records an operation (export, frequency count, …) applies to.
 #[derive(Clone, Copy, Debug)]
 pub enum Selection<'a> {
     All,
     Matches(&'a MatchSet),
     Range { first: u64, count: u64 },
+}
+
+impl Selection<'_> {
+    #[inline]
+    pub fn includes(&self, ordinal: u64) -> bool {
+        match self {
+            Selection::All => true,
+            Selection::Matches(m) => m.contains(ordinal),
+            Selection::Range { first, count } => {
+                ordinal >= *first && ordinal < first.saturating_add(*count)
+            }
+        }
+    }
+
+    /// Number of records selected, when known without scanning.
+    pub fn size_hint(&self, total: u64) -> u64 {
+        match self {
+            Selection::All => total,
+            Selection::Matches(m) => m.len(),
+            Selection::Range { first, count } => (*count).min(total.saturating_sub(*first)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

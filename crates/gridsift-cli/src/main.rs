@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gridsift_core::dialect::sniff;
 use gridsift_core::export::{ExportOptions, Selection, Terminator, export};
+use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
 use gridsift_core::hash::{MultiHasher, hash_source, hex};
 use gridsift_core::index::{BuildOptions, IndexParams, SparseIndex, bootstrap, build_index};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
@@ -181,6 +182,36 @@ enum Cmd {
         /// Only check the output, not the source
         #[arg(long)]
         skip_source: bool,
+    },
+    /// Count the values of one column (top-N), over all records or a search's matches
+    Freq {
+        file: PathBuf,
+        /// Column to count (header name or 0-based index)
+        #[arg(long, short = 'c')]
+        column: String,
+        /// Number of values to show
+        #[arg(long, short = 'n', default_value_t = 20)]
+        top: usize,
+        #[command(flatten)]
+        dialect: DialectArgs,
+        /// Count only records matching this pattern (whole record)
+        #[arg(long, short = 's')]
+        search: Option<String>,
+        /// Interpret the pattern as a regular expression
+        #[arg(long, short = 'r', requires = "search")]
+        regex: bool,
+        /// Case-insensitive matching
+        #[arg(long, short = 'i', requires = "search")]
+        ignore_case: bool,
+        /// Count the records that do NOT match
+        #[arg(long, short = 'v', requires = "search")]
+        invert: bool,
+        /// Worker threads (0 = all cores)
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+        /// Index to use (default: the user cache directory)
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Detect what each column holds (ip, domain, hash, timestamp, …) from a sample
     Profile {
@@ -372,6 +403,32 @@ fn main() {
             source,
             skip_source,
         } => cmd_verify(&output, manifest, source, skip_source, json),
+        Cmd::Freq {
+            file,
+            column,
+            top,
+            dialect,
+            search,
+            regex,
+            ignore_case,
+            invert,
+            threads,
+            index,
+        } => cmd_freq(
+            &file,
+            &dialect,
+            FreqArgs {
+                column,
+                top,
+                search,
+                regex,
+                ignore_case,
+                invert,
+                threads,
+                index_path: index,
+            },
+            json,
+        ),
         Cmd::Profile {
             file,
             dialect,
@@ -1535,6 +1592,206 @@ fn cmd_profile(
         } else {
             "; run `gridsift index` first for a file-wide sample"
         }
+    );
+    Ok(())
+}
+
+struct FreqArgs {
+    column: String,
+    top: usize,
+    search: Option<String>,
+    regex: bool,
+    ignore_case: bool,
+    invert: bool,
+    threads: usize,
+    index_path: Option<PathBuf>,
+}
+
+/// Run a whole-record search and return its match set (for `--search` on
+/// counting commands).
+fn search_matches(
+    src: &Source,
+    idx: &SparseIndex,
+    query: &SearchQuery,
+    threads: usize,
+    json: bool,
+) -> Result<MatchSet> {
+    let compiled = query
+        .compile(idx.params.dialect)
+        .map_err(|e| anyhow::anyhow!("invalid pattern: {e}"))?;
+    let shared = SearchShared::new(src.len());
+    let opts = SearchOptions {
+        threads,
+        ..SearchOptions::default()
+    };
+    let pb = progress_bar(src.len(), json);
+    let outcome = std::thread::scope(|s| {
+        let h = s.spawn(|| search(src, idx, &compiled, opts, &shared));
+        while !h.is_finished() {
+            pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.join().expect("search thread")
+    });
+    pb.finish_and_clear();
+    if !outcome.complete {
+        bail!(
+            "search did not complete{}",
+            outcome.error.map(|e| format!(": {e}")).unwrap_or_default()
+        );
+    }
+    shared
+        .matches
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("match set poisoned"))
+}
+
+fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<()> {
+    let src = open(file)?;
+    let (sn, dialect) = resolve_dialect(&src, args)?;
+    let params = IndexParams {
+        dialect,
+        scan_start: sn.scan_start,
+        ..IndexParams::default()
+    };
+    let (idx, from_index) = load_index(file, &src, params, o.index_path)?;
+    if !from_index && !json {
+        eprintln!(
+            "note: no index for this file; counting sequentially (run `gridsift index` first for a parallel count)"
+        );
+    }
+    let header = header_fields(&src, &idx);
+    let column = resolve_columns(std::slice::from_ref(&o.column), header.as_deref())?
+        .and_then(|c| c.first().copied())
+        .expect("one column");
+    let column_name = header
+        .as_ref()
+        .and_then(|h| h.get(column))
+        .map(|f| field_str(f).into_owned())
+        .unwrap_or_else(|| format!("col{column}"));
+
+    let matches = match &o.search {
+        Some(pattern) => Some(search_matches(
+            &src,
+            &idx,
+            &SearchQuery {
+                pattern: pattern.clone(),
+                kind: if o.regex {
+                    PatternKind::Regex
+                } else {
+                    PatternKind::Literal
+                },
+                case_insensitive: o.ignore_case,
+                columns: None,
+                invert: o.invert,
+            },
+            o.threads,
+            json,
+        )?),
+        None => None,
+    };
+    let selection = match &matches {
+        Some(m) => Selection::Matches(m),
+        None => Selection::All,
+    };
+
+    let shared = FrequencyShared::new(src.len());
+    let opts = FrequencyOptions {
+        column,
+        top: o.top,
+        threads: o.threads,
+        ..FrequencyOptions::default()
+    };
+    let pb = progress_bar(src.len(), json);
+    let result = std::thread::scope(|s| {
+        let h = s.spawn(|| frequency(&src, &idx, selection, opts, &shared));
+        while !h.is_finished() {
+            pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.join().expect("frequency thread")
+    })
+    .context("counting")?;
+    pb.finish_and_clear();
+    if !result.complete {
+        bail!("count did not complete");
+    }
+    let rss = peak_rss_bytes();
+    let share = |n: u64| {
+        if result.counted == 0 {
+            0.0
+        } else {
+            n as f64 * 100.0 / result.counted as f64
+        }
+    };
+
+    if json {
+        return print_json(&json!({
+            "file": file.display().to_string(),
+            "column": column,
+            "column_name": column_name,
+            "search": o.search,
+            "counted": result.counted,
+            "empty": result.empty,
+            "distinct": result.distinct,
+            "exact": result.exact,
+            "error_bound": result.error_bound,
+            "top": result.top.iter().map(|e| json!({
+                "value": field_str(&e.value),
+                "count": e.count,
+                "share": share(e.count) / 100.0,
+            })).collect::<Vec<_>>(),
+            "elapsed_s": result.elapsed.as_secs_f64(),
+            "throughput_mib_s": mib_per_s(shared.bytes.load(std::sync::atomic::Ordering::Relaxed), result.elapsed),
+            "threads": result.threads,
+            "peak_rss_bytes": rss,
+        }));
+    }
+    let width = result
+        .top
+        .iter()
+        .map(|e| field_str(&e.value).chars().count().min(60))
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    println!("{:<width$}  {:>14}  {:>7}", column_name, "count", "share");
+    for e in &result.top {
+        let v = field_str(&e.value)
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        let v: String = if v.chars().count() > 60 {
+            let cut: String = v.chars().take(59).collect();
+            format!("{cut}…")
+        } else {
+            v
+        };
+        println!(
+            "{:<width$}  {:>14}  {:>6.2}%",
+            v,
+            group_thousands(e.count),
+            share(e.count)
+        );
+    }
+    eprintln!(
+        "({} records, {} empty, {} distinct{}; {:.2} s, {:.0} MiB/s, {} thread(s), peak RSS {})",
+        group_thousands(result.counted),
+        group_thousands(result.empty),
+        group_thousands(result.distinct),
+        if result.exact {
+            String::new()
+        } else {
+            format!(
+                " (estimated; counts may be under by up to {})",
+                group_thousands(result.error_bound)
+            )
+        },
+        result.elapsed.as_secs_f64(),
+        mib_per_s(
+            shared.bytes.load(std::sync::atomic::Ordering::Relaxed),
+            result.elapsed
+        ),
+        result.threads,
+        human_bytes(rss)
     );
     Ok(())
 }

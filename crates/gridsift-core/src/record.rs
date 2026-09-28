@@ -21,16 +21,9 @@ pub fn split_fields<'a>(
     let n = raw.len();
     let mut i = 0usize;
     loop {
-        match quote {
-            Some(q) if i < n && raw[i] == q => {
-                i = quoted_field(raw, i + 1, delimiter, q, out);
-            }
-            _ => {
-                let end = memchr(delimiter, &raw[i..]).map_or(n, |p| i + p);
-                out.push(Cow::Borrowed(&raw[i..end]));
-                i = end;
-            }
-        }
+        let (field, next) = parse_field(raw, i, delimiter, quote);
+        out.push(field);
+        i = next;
         if i < n && raw[i] == delimiter {
             i += 1;
             // a trailing delimiter yields one more (empty) field
@@ -40,15 +33,62 @@ pub fn split_fields<'a>(
     }
 }
 
+/// The `k`-th field (0-based) of `raw`, or `None` if the record has fewer
+/// fields. Earlier fields are skipped without being materialised.
+pub fn nth_field(raw: &[u8], delimiter: u8, quote: Option<u8>, k: usize) -> Option<Cow<'_, [u8]>> {
+    let n = raw.len();
+    let mut i = 0usize;
+    for _ in 0..k {
+        i = skip_field(raw, i, delimiter, quote);
+        if i < n && raw[i] == delimiter {
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    Some(parse_field(raw, i, delimiter, quote).0)
+}
+
+/// Parse the field starting at `i`; returns it and the index of the byte
+/// following it (a delimiter or `raw.len()`).
+fn parse_field(raw: &[u8], i: usize, delimiter: u8, quote: Option<u8>) -> (Cow<'_, [u8]>, usize) {
+    let n = raw.len();
+    match quote {
+        Some(q) if i < n && raw[i] == q => quoted_field(raw, i + 1, delimiter, q),
+        _ => {
+            let end = memchr(delimiter, &raw[i..]).map_or(n, |p| i + p);
+            (Cow::Borrowed(&raw[i..end]), end)
+        }
+    }
+}
+
+/// Index of the byte following the field starting at `i`, without building
+/// the field.
+fn skip_field(raw: &[u8], i: usize, delimiter: u8, quote: Option<u8>) -> usize {
+    let n = raw.len();
+    match quote {
+        Some(q) if i < n && raw[i] == q => {
+            let mut j = i + 1;
+            loop {
+                let Some(p) = memchr(q, &raw[j..]) else {
+                    return n; // unterminated quote swallows the rest
+                };
+                let qpos = j + p;
+                if raw.get(qpos + 1) == Some(&q) {
+                    j = qpos + 2; // escaped quote
+                    continue;
+                }
+                // closing quote; lenient tail runs to the delimiter
+                return memchr(delimiter, &raw[qpos + 1..]).map_or(n, |p| qpos + 1 + p);
+            }
+        }
+        _ => memchr(delimiter, &raw[i..]).map_or(n, |p| i + p),
+    }
+}
+
 /// Parse a quoted field whose opening quote sits just before `i`.
-/// Returns the index of the byte following the field (a delimiter or `raw.len()`).
-fn quoted_field<'a>(
-    raw: &'a [u8],
-    mut i: usize,
-    delimiter: u8,
-    q: u8,
-    out: &mut Vec<Cow<'a, [u8]>>,
-) -> usize {
+/// Returns the field and the index of the byte following it.
+fn quoted_field(raw: &[u8], mut i: usize, delimiter: u8, q: u8) -> (Cow<'_, [u8]>, usize) {
     let n = raw.len();
     let mut seg_start = i;
     let mut owned: Option<Vec<u8>> = None;
@@ -56,14 +96,14 @@ fn quoted_field<'a>(
         let Some(p) = memchr(q, &raw[i..]) else {
             // Unterminated quote: everything to the end is the field.
             let seg = &raw[seg_start..];
-            out.push(match owned {
+            let field = match owned {
                 None => Cow::Borrowed(seg),
                 Some(mut v) => {
                     v.extend_from_slice(seg);
                     Cow::Owned(v)
                 }
-            });
-            return n;
+            };
+            return (field, n);
         };
         let qpos = i + p;
         if raw.get(qpos + 1) == Some(&q) {
@@ -81,7 +121,7 @@ fn quoted_field<'a>(
         let tail_start = qpos + 1;
         let tail_end = memchr(delimiter, &raw[tail_start..]).map_or(n, |p| tail_start + p);
         let tail = &raw[tail_start..tail_end];
-        out.push(match owned {
+        let field = match owned {
             None if tail.is_empty() => Cow::Borrowed(seg),
             None => {
                 let mut v = Vec::with_capacity(seg.len() + tail.len());
@@ -94,8 +134,8 @@ fn quoted_field<'a>(
                 v.extend_from_slice(tail);
                 Cow::Owned(v)
             }
-        });
-        return tail_end;
+        };
+        return (field, tail_end);
     }
 }
 
@@ -153,6 +193,37 @@ mod tests {
             out.into_iter().map(|c| c.into_owned()).collect::<Vec<_>>(),
             v(&["\"a\"", "b"])
         );
+    }
+
+    #[test]
+    fn nth_field_agrees_with_split() {
+        let cases: &[&[u8]] = &[
+            b"a,b,c",
+            b"",
+            b",",
+            b"a,",
+            b",,",
+            b"\"a,b\",c",
+            b"\"a\"\"b\",c,\"\"",
+            b"x,\"line\nbreak\",\"q\"\"\"",
+            b"\"a\"b,c",
+            b"\"unterminated,x",
+            b"a\"b,\"c",
+            b"one",
+        ];
+        for raw in cases {
+            let mut all = Vec::new();
+            split_fields(raw, b',', Some(b'"'), &mut all);
+            for k in 0..all.len() + 2 {
+                let got = nth_field(raw, b',', Some(b'"'), k);
+                assert_eq!(
+                    got.as_deref(),
+                    all.get(k).map(|c| c.as_ref()),
+                    "record {:?} field {k}",
+                    String::from_utf8_lossy(raw)
+                );
+            }
+        }
     }
 
     #[test]

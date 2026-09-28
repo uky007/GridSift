@@ -116,6 +116,21 @@ share (timestamp, ipv4 ×2, port, categorical, domain, categorical,
 http_status, integer, text, categorical ×2, sha256) in 0.6 s, dominated by
 page faults at the 48 sample positions.
 
+### Value counts (`freq`, 1 GiB, warm cache, 10 threads)
+
+| Column | Distinct | Mode | Time | Throughput | peak RSS |
+|---|---:|---|---:|---:|---:|
+| `status` (5 values) | 5 | exact | 0.37 s | 2.7 GiB/s | 47 MiB |
+| `host` | 5,829 | exact | 0.12 s | 8.2 GiB/s | 53 MiB |
+| `sha256` (unique per row) | 4,858,496 est. (true 4,840,035) | lossy, bound 479 | 0.44 s | 2.3 GiB/s | 323 MiB |
+| `dst_port` over the 144,743 records matching `,deny,` | 13,064 | exact | 0.09 s | 11.9 GiB/s | 60 MiB |
+
+The `status` counts were cross-checked against a Python `Counter` over the
+same file (identical). The high-cardinality case shows the bounded-memory
+fallback: ten workers each keep at most 131,072 exact entries before going
+lossy, so RSS stays in the low hundreds of MiB however many distinct values
+the column has.
+
 ## Still to do
 
 - Cold-cache runs (`sudo purge`), and a 100 GiB run on external storage.

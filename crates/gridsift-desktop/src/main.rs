@@ -21,6 +21,7 @@ use eframe::egui::{self, Align, Color32, Key, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
 use gridsift_core::dialect::sniff;
 use gridsift_core::export::{ExportOptions, ExportReport, Selection, export};
+use gridsift_core::frequency::{FrequencyOptions, FrequencyResult, FrequencyShared, frequency};
 use gridsift_core::hash::hex;
 use gridsift_core::index::{BuildOptions, IndexParams, SparseIndex, bootstrap, build_index};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
@@ -51,12 +52,14 @@ const PROBE_ROWS: usize = 1000;
 /// Decoded rows kept in memory before the cache is flushed.
 const CACHE_CAP: usize = 20_000;
 
-/// `gridsift-desktop [FILE] [--search PATTERN] [--regex] [--filter]`
+/// `gridsift-desktop [FILE] [--search PATTERN] [--regex] [--filter] [--count COLUMN]`
 struct Launch {
     file: Option<PathBuf>,
     search: Option<String>,
     regex: bool,
     filter: bool,
+    /// Column index to count on launch.
+    count: Option<usize>,
 }
 
 fn parse_args() -> Launch {
@@ -65,6 +68,7 @@ fn parse_args() -> Launch {
         search: None,
         regex: false,
         filter: false,
+        count: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -72,6 +76,7 @@ fn parse_args() -> Launch {
             "--search" => l.search = args.next(),
             "--regex" => l.regex = true,
             "--filter" => l.filter = true,
+            "--count" => l.count = args.next().and_then(|c| c.parse().ok()),
             _ if l.file.is_none() => l.file = Some(PathBuf::from(a)),
             _ => {}
         }
@@ -104,6 +109,10 @@ fn main() -> Result<(), eframe::Error> {
                     d.search_ui.regex = launch.regex;
                     d.search_ui.filter = launch.filter;
                     d.start_search(&cc.egui_ctx);
+                }
+                if let (Some(d), Some(column)) = (&mut app.doc, launch.count) {
+                    d.freq_column = column;
+                    d.start_freq();
                 }
             }
             Ok(Box::new(app))
@@ -304,6 +313,23 @@ struct ExportJob {
 }
 
 // ---------------------------------------------------------------------------
+// background value count
+
+struct FreqJob {
+    shared: Arc<FrequencyShared>,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<std::io::Result<FrequencyResult>>>,
+    column: usize,
+}
+
+struct FreqView {
+    column: usize,
+    result: FrequencyResult,
+    /// (value, count, share) ready for display.
+    rows: Vec<(String, u64, f32)>,
+}
+
+// ---------------------------------------------------------------------------
 // document
 
 /// Decoded rows by record ordinal, filled in windows (contiguous view) or
@@ -391,6 +417,12 @@ struct Document {
     /// Column typing: from the probe rows at first, file-wide once indexed.
     profile: Option<Profile>,
     profile_job: Option<JoinHandle<Profile>>,
+    /// Column selected for value counting.
+    freq_column: usize,
+    freq_job: Option<FreqJob>,
+    freq: Option<FreqView>,
+    /// A value clicked in the count panel: (column, value) to filter by.
+    pending_pivot: Option<(usize, String)>,
     /// Open → first rows on screen.
     first_rows_in: Duration,
     index_elapsed: Option<Duration>,
@@ -476,6 +508,10 @@ impl Document {
             export: None,
             profile: Some(quick_profile),
             profile_job,
+            freq_column: 0,
+            freq_job: None,
+            freq: None,
+            pending_pivot: None,
             first_rows_in,
             index_elapsed: None,
             index_from_sidecar: from_sidecar,
@@ -604,6 +640,85 @@ impl Document {
                     self.profile = Some(p);
                 }
             }
+        }
+    }
+
+    /// Count the values of `freq_column` over the current view (matches when
+    /// filtering, else all records) on worker threads.
+    fn start_freq(&mut self) {
+        if let Some(j) = &self.freq_job {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+        let index = match self.index.read() {
+            Ok(i) => i.clone(),
+            Err(_) => return,
+        };
+        let matches: Option<gridsift_core::search::MatchSet> =
+            match (&self.search, self.search_ui.filter) {
+                (Some(s), true) => Some(s.shared.matches.lock().expect("match set").clone()),
+                _ => None,
+            };
+        let shared = Arc::new(FrequencyShared::new(self.source.len()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let column = self.freq_column;
+        let (source, s2, c2) = (self.source.clone(), shared.clone(), cancel.clone());
+        let handle = std::thread::Builder::new()
+            .name("gridsift-freq".into())
+            .spawn(move || {
+                let selection = match &matches {
+                    Some(m) => Selection::Matches(m),
+                    None => Selection::All,
+                };
+                let opts = FrequencyOptions {
+                    column,
+                    top: 500,
+                    cancel: Some(&c2),
+                    ..FrequencyOptions::default()
+                };
+                frequency(&source, &index, selection, opts, &s2)
+            })
+            .expect("spawn freq thread");
+        self.freq_job = Some(FreqJob {
+            shared,
+            cancel,
+            handle: Some(handle),
+            column,
+        });
+    }
+
+    fn poll_freq(&mut self) {
+        let Some(job) = &mut self.freq_job else {
+            return;
+        };
+        if !job.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        let handle = job.handle.take().expect("handle present until joined");
+        let column = job.column;
+        self.freq_job = None;
+        match handle.join() {
+            Ok(Ok(result)) if result.complete => {
+                let total = result.counted.max(1) as f32;
+                let rows = result
+                    .top
+                    .iter()
+                    .map(|e| {
+                        (
+                            String::from_utf8_lossy(&e.value).into_owned(),
+                            e.count,
+                            e.count as f32 / total,
+                        )
+                    })
+                    .collect();
+                self.freq = Some(FreqView {
+                    column,
+                    result,
+                    rows,
+                });
+            }
+            Ok(Ok(_)) => self.status = Some("count cancelled".into()),
+            Ok(Err(e)) => self.status = Some(format!("count failed: {e}")),
+            Err(_) => self.status = Some("count thread panicked".into()),
         }
     }
 
@@ -794,6 +909,9 @@ impl App {
             if let Some(j) = &d.export {
                 j.cancel.store(true, Ordering::Relaxed);
             }
+            if let Some(j) = &d.freq_job {
+                j.cancel.store(true, Ordering::Relaxed);
+            }
         }
         self.doc = None;
     }
@@ -826,6 +944,19 @@ impl eframe::App for App {
             d.poll_search();
             d.poll_export();
             d.poll_profile();
+            d.poll_freq();
+            if let Some((column, value)) = d.pending_pivot.take() {
+                d.search_ui.pattern = value;
+                d.search_ui.column = Some(column);
+                d.search_ui.regex = false;
+                d.search_ui.ignore_case = false;
+                d.search_ui.invert = false;
+                d.search_ui.filter = true;
+                d.start_search(ctx);
+            }
+            if d.freq_job.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             if d.profile_job.is_some() {
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
@@ -944,6 +1075,10 @@ impl eframe::App for App {
                 });
             });
         });
+
+        if let Some(d) = &mut self.doc {
+            freq_panel(ctx, d);
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.inner_margin(0.0))
@@ -1154,6 +1289,32 @@ fn search_bar(ui: &mut egui::Ui, ctx: &egui::Context, d: &mut Document) {
         d.start_search(ctx);
     }
 
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Count values of").weak());
+        let name = d
+            .header
+            .get(d.freq_column)
+            .cloned()
+            .unwrap_or_else(|| format!("col{}", d.freq_column));
+        egui::ComboBox::from_id_salt("freq-column")
+            .selected_text(name)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for (i, name) in d.header.iter().enumerate() {
+                    ui.selectable_value(&mut d.freq_column, i, name);
+                }
+            });
+        let scope = if d.search_ui.filter && d.search.is_some() {
+            "over the matches"
+        } else {
+            "over all records"
+        };
+        if ui.button("Count").clicked() {
+            d.start_freq();
+        }
+        ui.label(RichText::new(scope).weak());
+    });
+
     if let Some(e) = &d.search_ui.error {
         ui.colored_label(Color32::LIGHT_RED, format!("invalid pattern: {e}"));
     }
@@ -1317,6 +1478,130 @@ fn grid(ui: &mut egui::Ui, d: &mut Document) {
     if let Some(t) = top {
         *first_visible = t;
     }
+}
+
+/// Bottom panel with the value counts of one column; a click on a value
+/// filters the grid by it.
+fn freq_panel(ctx: &egui::Context, d: &mut Document) {
+    if d.freq.is_none() && d.freq_job.is_none() {
+        return;
+    }
+    egui::TopBottomPanel::bottom("freq")
+        .resizable(true)
+        .default_height(240.0)
+        .show(ctx, |ui| {
+            let (mut close, mut cancel) = (false, false);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if let Some(job) = &d.freq_job {
+                    let name = d.header.get(job.column).cloned().unwrap_or_default();
+                    ui.label(format!("counting {name}…"));
+                    ui.add(egui::ProgressBar::new(job.shared.fraction()).desired_width(160.0));
+                    if ui.small_button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                } else if let Some(v) = &d.freq {
+                    let r = &v.result;
+                    ui.strong(d.header.get(v.column).cloned().unwrap_or_default());
+                    ui.label(format!(
+                        "{} distinct{} · {} records · {} empty · {:.2} s",
+                        group_thousands(r.distinct),
+                        if r.exact { "" } else { " (estimated)" },
+                        group_thousands(r.counted),
+                        group_thousands(r.empty),
+                        r.elapsed.as_secs_f64()
+                    ));
+                    if !r.exact {
+                        ui.label(
+                            RichText::new(format!(
+                                "counts may be under by up to {}",
+                                group_thousands(r.error_bound)
+                            ))
+                            .color(Color32::KHAKI),
+                        );
+                    }
+                    ui.label(RichText::new("click a value to filter by it").weak());
+                }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("✕").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if cancel {
+                if let Some(j) = &d.freq_job {
+                    j.cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            if close {
+                if let Some(j) = &d.freq_job {
+                    j.cancel.store(true, Ordering::Relaxed);
+                }
+                d.freq_job = None;
+                d.freq = None;
+                return;
+            }
+            let mut clicked: Option<(usize, String)> = None;
+            if let Some(v) = &d.freq {
+                TableBuilder::new(ui)
+                    .id_salt("freq-table")
+                    .striped(true)
+                    .sense(egui::Sense::click())
+                    .vscroll(true)
+                    .auto_shrink([false, false])
+                    .cell_layout(egui::Layout::left_to_right(Align::Center))
+                    .column(Column::initial(420.0).at_least(80.0).clip(true))
+                    .column(Column::exact(120.0))
+                    .column(Column::exact(80.0))
+                    .column(Column::remainder())
+                    .header(20.0, |mut h| {
+                        for t in ["value", "count", "share", ""] {
+                            h.col(|ui| {
+                                ui.label(RichText::new(t).strong().color(HEADER_TEXT));
+                            });
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(ROW_HEIGHT, v.rows.len(), |mut row| {
+                            let (value, count, share) = &v.rows[row.index()];
+                            row.col(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(value).monospace().color(CELL_TEXT),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label(
+                                    RichText::new(group_thousands(*count))
+                                        .monospace()
+                                        .color(CELL_TEXT),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{:.2}%", share * 100.0))
+                                        .monospace()
+                                        .color(CELL_TEXT),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.add(
+                                    egui::ProgressBar::new(*share)
+                                        .desired_width(ui.available_width().max(40.0)),
+                                );
+                            });
+                            if row.response().clicked() {
+                                clicked = Some((v.column, value.clone()));
+                            }
+                        });
+                    });
+            }
+            if clicked.is_some() {
+                d.pending_pivot = clicked;
+            }
+        });
 }
 
 fn row_number_width(total: usize) -> f32 {

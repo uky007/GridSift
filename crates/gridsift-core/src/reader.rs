@@ -141,6 +141,15 @@ pub fn locate_many(source: &Source, index: &SparseIndex, ordinals: &[u64]) -> Ve
     out
 }
 
+/// A stretch of the file to stream: from a checkpoint up to `end` (an offset
+/// that is a record boundary, or EOF).
+#[derive(Clone, Copy, Debug)]
+pub struct StreamRange {
+    pub from: Checkpoint,
+    pub end: u64,
+    pub chunk_size: usize,
+}
+
 /// Stream every record from checkpoint `from` to EOF in order, reading the
 /// file sequentially in `chunk_size` blocks (bounded memory, read-ahead
 /// friendly). `f` gets each record's span and exact content bytes; return
@@ -154,18 +163,38 @@ pub fn stream_records(
     cancel: Option<&AtomicBool>,
     f: &mut dyn FnMut(RecordSpan, &[u8]) -> Control,
 ) -> io::Result<bool> {
+    let range = StreamRange {
+        from,
+        end: source.len(),
+        chunk_size,
+    };
+    stream_records_range(source, index, range, cancel, &mut |_| {}, f)
+}
+
+/// Like [`stream_records`], but over a byte range that ends at a record
+/// boundary. `progress` receives the bytes consumed after each chunk.
+pub fn stream_records_range(
+    source: &Source,
+    index: &SparseIndex,
+    range: StreamRange,
+    cancel: Option<&AtomicBool>,
+    progress: &mut dyn FnMut(u64),
+    f: &mut dyn FnMut(RecordSpan, &[u8]) -> Control,
+) -> io::Result<bool> {
     let cfg = index.params.dialect.scan_config(false);
     let total = source.len();
-    let mut pos = from.offset.min(total);
-    let mut scanner = Scanner::at(cfg, pos, from.record);
-    let chunk_size = chunk_size.clamp(64 << 10, 1 << 30);
+    let end_at = range.end.min(total);
+    let mut pos = range.from.offset.min(end_at);
+    let mut scanner = Scanner::at(cfg, pos, range.from.record);
+    let chunk_size = range.chunk_size.clamp(64 << 10, 1 << 30);
     let mut buf = vec![0u8; chunk_size];
     let mut stopped = false;
-    while pos < total && !stopped {
+    while pos < end_at && !stopped {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Ok(false);
         }
-        let n = source.read_at(&mut buf, pos)?;
+        let want = ((end_at - pos) as usize).min(chunk_size);
+        let n = source.read_at(&mut buf[..want], pos)?;
         if n == 0 {
             break;
         }
@@ -180,8 +209,10 @@ pub fn stream_records(
             };
             f(sp, bytes)
         };
+        // only EOF can leave a record unterminated; a range end is a boundary
         stopped = scanner.feed(chunk, &mut sink) == Control::Stop
             || (end >= total && scanner.finish(&mut sink) == Control::Stop);
+        progress(n as u64);
         pos = end;
     }
     Ok(true)

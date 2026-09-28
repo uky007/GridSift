@@ -15,6 +15,7 @@
 //! - [`reader`]  viewport: records by ordinal via the index
 //! - [`search`]  parallel literal / regex search producing a match bitmap
 //! - [`export`]  atomic, hashed export of a selection to a new file
+//! - [`frequency`] parallel top-N value counts for a column
 //! - [`semantic`] semantic column typing (ip, domain, hash, timestamp, …)
 //! - [`manifest`] provenance manifest written next to every export
 //! - [`hash`]    streaming SHA-256 / BLAKE3
@@ -24,6 +25,7 @@
 
 pub mod dialect;
 pub mod export;
+pub mod frequency;
 pub mod hash;
 pub mod index;
 pub mod manifest;

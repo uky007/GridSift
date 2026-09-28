@@ -38,11 +38,13 @@ only on export.
 crates/gridsift-core     engine: source, dialect sniffing, scanner, sparse index,
                          viewport reader, digests, synthetic data
 crates/gridsift-cli      `gridsift` command-line tool (info / index / rows /
-                         search / export / verify / profile / count / hash / gen)
+                         search / freq / export / verify / profile / count /
+                         hash / gen)
 crates/gridsift-desktop  `gridsift-desktop`, the egui application: open a file,
                          rows appear immediately, index + SHA-256 build in the
                          background, virtual grid with go-to-row, parallel
-                         literal/regex search with highlight or filtered view
+                         literal/regex search with highlight or filtered view,
+                         value counts with click-to-filter, export with manifest
 bench/                   benchmark procedure and baseline numbers
 survey/                  background research the design is based on
 ```
@@ -68,6 +70,8 @@ gridsift search /tmp/narrow-1g.csv -r 'deny,"curl/[0-9.]+"'      # regex, all co
 gridsift export /tmp/narrow-1g.csv -o beacon.csv -s '/c2/beacon' -c path
 gridsift verify beacon.csv                  # re-hashes output and source against the manifest
 gridsift profile /tmp/narrow-1g.csv         # what each column holds: ipv4, domain, sha256, …
+gridsift freq /tmp/narrow-1g.csv -c host -n 20               # top hosts over all records
+gridsift freq /tmp/narrow-1g.csv -c dst_port -s ',deny,'     # …over the records matching a search
 gridsift-desktop /tmp/narrow-1g.csv         # or drag & drop onto the window
 gridsift-desktop /tmp/narrow-1g.csv --search '/c2/beacon' --filter
 ```
@@ -82,6 +86,17 @@ onto the source. `verify` recomputes both digests.
 The desktop app and the CLI share the index sidecar (stored under the user
 cache directory, never next to the evidence), so a file indexed by one opens
 instantly in the other.
+
+## Value counts
+
+`freq` (and the desktop "Count values of" panel) counts the values of one
+column over all records or over a search's matches, on all cores. Counting
+is exact up to 131,072 distinct values per worker; beyond that it switches
+to lossy counting so memory stays bounded on high-cardinality columns
+(hashes, unique IDs), and the result then says so and gives an error bound.
+Distinct values are counted exactly when possible and estimated with
+HyperLogLog otherwise. In the desktop app, clicking a value filters the grid
+by it — the pivot step of an investigation.
 
 ## Semantic typing
 
