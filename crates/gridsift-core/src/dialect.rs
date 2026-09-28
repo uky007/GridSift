@@ -210,10 +210,10 @@ fn sample_spans(
         });
         // A record that ended exactly at the sample boundary of a longer file
         // is probably cut off; do not let it vote.
-        if let Some(s) = tail {
-            if !truncated {
-                spans.push(s);
-            }
+        if let Some(s) = tail
+            && !truncated
+        {
+            spans.push(s);
         }
     }
     spans

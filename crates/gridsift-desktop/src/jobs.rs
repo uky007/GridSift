@@ -152,11 +152,11 @@ impl SelectionOp {
                 if q.invert {
                     s = format!("not {s}");
                 }
-                if let Some(cols) = &q.columns {
-                    if let Some(&c) = cols.first() {
-                        let name = header.get(c).cloned().unwrap_or_else(|| format!("col{c}"));
-                        s = format!("{s} in {name}");
-                    }
+                if let Some(cols) = &q.columns
+                    && let Some(&c) = cols.first()
+                {
+                    let name = header.get(c).cloned().unwrap_or_else(|| format!("col{c}"));
+                    s = format!("{s} in {name}");
                 }
                 s
             }
@@ -250,12 +250,11 @@ impl SelectionNode {
         let Ok(mut h) = self.handle.lock() else {
             return;
         };
-        if h.as_ref().is_some_and(|j| j.is_finished()) {
-            if let Some(j) = h.take() {
-                if let Ok(mut o) = self.outcome.lock() {
-                    *o = j.join().ok();
-                }
-            }
+        if h.as_ref().is_some_and(|j| j.is_finished())
+            && let Some(j) = h.take()
+            && let Ok(mut o) = self.outcome.lock()
+        {
+            *o = j.join().ok();
         }
     }
 

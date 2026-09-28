@@ -112,10 +112,10 @@ fn main() -> Result<(), eframe::Error> {
                     if let Some(column) = launch.count {
                         d.start_freq(column);
                     }
-                    if launch.timeline {
-                        if let Some(c) = d.timestamp_column() {
-                            d.start_timeline(c);
-                        }
+                    if launch.timeline
+                        && let Some(c) = d.timestamp_column()
+                    {
+                        d.start_timeline(c);
                     }
                     if launch.export_dialog {
                         d.export_ui.show(d.header.len());
@@ -201,10 +201,10 @@ fn apply_to_document(ctx: &egui::Context, d: &mut Document, action: Action) {
         }
         Action::RedactOnExport(c) => {
             d.export_ui.show(d.header.len());
-            if let Some(choice) = d.export_ui.choices.get_mut(c) {
-                if *choice == RuleChoice::Keep {
-                    *choice = RuleChoice::Mask;
-                }
+            if let Some(choice) = d.export_ui.choices.get_mut(c)
+                && *choice == RuleChoice::Keep
+            {
+                *choice = RuleChoice::Mask;
             }
         }
         Action::Export => d.export_ui.show(d.header.len()),

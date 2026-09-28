@@ -646,10 +646,10 @@ impl Document {
                     w.digests = d;
                     w.clone()
                 });
-                if let (Some(idx), Some(p)) = (saved, &self.sidecar) {
-                    if let Err(e) = idx.save_for(&self.source, p) {
-                        self.status = Some(format!("index not saved: {e}"));
-                    }
+                if let (Some(idx), Some(p)) = (saved, &self.sidecar)
+                    && let Err(e) = idx.save_for(&self.source, p)
+                {
+                    self.status = Some(format!("index not saved: {e}"));
                 }
             }
             Ok(Ok(None)) => {}
@@ -675,10 +675,10 @@ impl Document {
                 let complete = idx.stats.complete;
                 if complete {
                     self.spawn_profile(idx.clone());
-                    if let Some(p) = &self.sidecar {
-                        if let Err(e) = idx.save_for(&self.source, p) {
-                            self.status = Some(format!("index not saved: {e}"));
-                        }
+                    if let Some(p) = &self.sidecar
+                        && let Err(e) = idx.save_for(&self.source, p)
+                    {
+                        self.status = Some(format!("index not saved: {e}"));
                     }
                     self.index_elapsed = Some(elapsed);
                 } else {
@@ -706,12 +706,11 @@ impl Document {
     }
 
     fn poll_profile(&mut self) {
-        if self.profile_job.as_ref().is_some_and(|h| h.is_finished()) {
-            if let Some(h) = self.profile_job.take() {
-                if let Ok(p) = h.join() {
-                    self.profile = Some(p);
-                }
-            }
+        if self.profile_job.as_ref().is_some_and(|h| h.is_finished())
+            && let Some(h) = self.profile_job.take()
+            && let Ok(p) = h.join()
+        {
+            self.profile = Some(p);
         }
     }
 
@@ -739,13 +738,13 @@ impl Document {
         } else {
             Some(s)
         };
-        if let Some(p) = &parent {
-            if !p.lineage_complete() {
-                return Err(
+        if let Some(p) = &parent
+            && !p.lineage_complete()
+        {
+            return Err(
                     "the current selection has a cancelled or failed step; remove it (×) before searching within it"
                         .into(),
                 );
-            }
         }
         let base = parent.as_ref().map(|p| p.matches());
         Ok((base, parent))
@@ -761,10 +760,10 @@ impl Document {
 
     /// Cancel the running scan (if any) without dropping its ancestors.
     fn cancel_running_selection(&mut self) {
-        if let Some(s) = &self.selection {
-            if s.running() {
-                s.cancel.store(true, Ordering::Relaxed);
-            }
+        if let Some(s) = &self.selection
+            && s.running()
+        {
+            s.cancel.store(true, Ordering::Relaxed);
         }
     }
 
@@ -807,10 +806,10 @@ impl Document {
                     ..SearchOptions::default()
                 };
                 let out = search(&source, &index, &compiled, opts, &s2);
-                if let Some(base) = &base {
-                    if let Ok(mut m) = s2.matches.lock() {
-                        m.intersect_with(base);
-                    }
+                if let Some(base) = &base
+                    && let Ok(mut m) = s2.matches.lock()
+                {
+                    m.intersect_with(base);
                 }
                 ctx2.request_repaint();
                 out
@@ -890,10 +889,11 @@ impl Document {
 
     /// Make an ancestor (or any node of the chain) the current selection.
     pub fn revert_to(&mut self, node: Arc<SelectionNode>) {
-        if let Some(cur) = &self.selection {
-            if !Arc::ptr_eq(cur, &node) && cur.running() {
-                cur.cancel.store(true, Ordering::Relaxed);
-            }
+        if let Some(cur) = &self.selection
+            && !Arc::ptr_eq(cur, &node)
+            && cur.running()
+        {
+            cur.cancel.store(true, Ordering::Relaxed);
         }
         self.selection = Some(node);
         self.cache.clear();

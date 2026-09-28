@@ -144,32 +144,32 @@ pub fn parse_timestamp(v: &[u8], reference_year: i64) -> Option<i64> {
         };
     }
     // ISO 8601: YYYY-MM-DD[T ]HH:MM[:SS[.f]][zone]  and  YYYY/MM/DD[ HH:MM[:SS]]
-    if let Some(y) = digits(v, 4) {
-        if matches!(v.get(4), Some(b'-') | Some(b'/')) {
-            let sep = v[4];
-            let m = digits(&v[5..], 2)?;
-            if v.get(7) != Some(&sep) {
-                return None;
-            }
-            let d = digits(&v[8..], 2)?;
-            if !valid_date(y as i64, m, d) {
-                return None;
-            }
-            let day = days_from_civil(y as i64, m, d) * 86_400;
-            let rest = &v[10..];
-            if rest.is_empty() {
-                return Some(day);
-            }
-            if !matches!(rest[0], b'T' | b't' | b' ') {
-                return None;
-            }
-            let (tod, n) = time_of_day(&rest[1..])?;
-            let (off, z) = zone(&rest[1 + n..])?;
-            if rest.len() != 1 + n + z {
-                return None;
-            }
-            return Some(day + tod - off);
+    if let Some(y) = digits(v, 4)
+        && matches!(v.get(4), Some(b'-') | Some(b'/'))
+    {
+        let sep = v[4];
+        let m = digits(&v[5..], 2)?;
+        if v.get(7) != Some(&sep) {
+            return None;
         }
+        let d = digits(&v[8..], 2)?;
+        if !valid_date(y as i64, m, d) {
+            return None;
+        }
+        let day = days_from_civil(y as i64, m, d) * 86_400;
+        let rest = &v[10..];
+        if rest.is_empty() {
+            return Some(day);
+        }
+        if !matches!(rest[0], b'T' | b't' | b' ') {
+            return None;
+        }
+        let (tod, n) = time_of_day(&rest[1..])?;
+        let (off, z) = zone(&rest[1 + n..])?;
+        if rest.len() != 1 + n + z {
+            return None;
+        }
+        return Some(day + tod - off);
     }
     // Apache CLF: DD/Mon/YYYY:HH:MM:SS [±HHMM]
     if v.len() >= 20 && v[2] == b'/' && v[6] == b'/' && v[11] == b':' {
@@ -191,21 +191,22 @@ pub fn parse_timestamp(v: &[u8], reference_year: i64) -> Option<i64> {
         return Some(days_from_civil(y, m, d) * 86_400 + tod - off);
     }
     // syslog: Mon DD HH:MM:SS (no year)
-    if v.len() >= 15 && v[3] == b' ' {
-        if let Some(m) = month_abbr(v) {
-            let mut i = 4;
-            while v.get(i) == Some(&b' ') {
-                i += 1;
-            }
-            let dlen = v[i..].iter().take_while(|b| b.is_ascii_digit()).count();
-            if (1..=2).contains(&dlen) {
-                let d = digits(&v[i..], dlen)?;
-                i += dlen;
-                if v.get(i) == Some(&b' ') {
-                    let (tod, n) = time_of_day(&v[i + 1..])?;
-                    if v.len() == i + 1 + n && valid_date(reference_year, m, d) {
-                        return Some(days_from_civil(reference_year, m, d) * 86_400 + tod);
-                    }
+    if v.len() >= 15
+        && v[3] == b' '
+        && let Some(m) = month_abbr(v)
+    {
+        let mut i = 4;
+        while v.get(i) == Some(&b' ') {
+            i += 1;
+        }
+        let dlen = v[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if (1..=2).contains(&dlen) {
+            let d = digits(&v[i..], dlen)?;
+            i += dlen;
+            if v.get(i) == Some(&b' ') {
+                let (tod, n) = time_of_day(&v[i + 1..])?;
+                if v.len() == i + 1 + n && valid_date(reference_year, m, d) {
+                    return Some(days_from_civil(reference_year, m, d) * 86_400 + tod);
                 }
             }
         }
@@ -638,20 +639,20 @@ pub fn select_time_range(
                                 if let Some(ts) = v
                                     .as_deref()
                                     .and_then(|v| parse_timestamp(v, opts.reference_year))
+                                    && ts >= from
+                                    && ts < to
                                 {
-                                    if ts >= from && ts < to {
-                                        local.insert(sp.ordinal);
-                                    }
+                                    local.insert(sp.ordinal);
                                 }
                             }
                             Control::Continue
                         },
                     );
                     shared.records.fetch_add(seen, Ordering::Relaxed);
-                    if !local.is_empty() {
-                        if let Ok(mut m) = shared.matches.lock() {
-                            m.union_with(&local);
-                        }
+                    if !local.is_empty()
+                        && let Ok(mut m) = shared.matches.lock()
+                    {
+                        m.union_with(&local);
                     }
                     match res {
                         Ok(true) => {}

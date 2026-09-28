@@ -499,10 +499,10 @@ fn search_range(
                 local.insert(sp.ordinal);
             }
         }
-        if !local.is_empty() {
-            if let Ok(mut m) = shared.matches.lock() {
-                m.union_with(&local);
-            }
+        if !local.is_empty()
+            && let Ok(mut m) = shared.matches.lock()
+        {
+            m.union_with(&local);
         }
         shared.bytes.fetch_add(n as u64, Ordering::Relaxed);
         shared

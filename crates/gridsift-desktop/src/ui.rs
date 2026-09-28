@@ -390,10 +390,11 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                             .desired_width(90.0)
                             .hint_text("0-based"),
                     );
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        if let Ok(n) = d.goto.replace([',', '_'], "").trim().parse::<u64>() {
-                            actions.push(Action::GoTo(n));
-                        }
+                    if r.lost_focus()
+                        && ui.input(|i| i.key_pressed(Key::Enter))
+                        && let Ok(n) = d.goto.replace([',', '_'], "").trim().parse::<u64>()
+                    {
+                        actions.push(Action::GoTo(n));
                     }
                 });
             });
@@ -727,13 +728,12 @@ fn timeline_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) 
                 RichText::new("no timeline yet — pick a timestamp column in the sidebar")
                     .color(DIM),
             );
-            if let Some(c) = d.timestamp_column() {
-                if ui
+            if let Some(c) = d.timestamp_column()
+                && ui
                     .small_button(format!("Timeline of {}", d.column_name(c)))
                     .clicked()
-                {
-                    actions.push(Action::Timeline(c));
-                }
+            {
+                actions.push(Action::Timeline(c));
             }
             return;
         };
@@ -836,16 +836,16 @@ fn timeline_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) 
             if resp.drag_started() {
                 v.drag_from = pointer.map(|p| p.x);
             }
-            if resp.dragged() {
-                if let (Some(f), Some(p)) = (v.drag_from, pointer) {
-                    v.sel = Some((f.min(p.x), f.max(p.x)));
-                }
+            if resp.dragged()
+                && let (Some(f), Some(p)) = (v.drag_from, pointer)
+            {
+                v.sel = Some((f.min(p.x), f.max(p.x)));
             }
-            if resp.clicked() {
-                if let Some(p) = pointer {
-                    let s = (p.x / width).floor() * width;
-                    v.sel = Some((s, s + width));
-                }
+            if resp.clicked()
+                && let Some(p) = pointer
+            {
+                let s = (p.x / width).floor() * width;
+                v.sel = Some((s, s + width));
             }
         });
 }

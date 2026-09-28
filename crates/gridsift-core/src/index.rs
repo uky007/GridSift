@@ -135,16 +135,17 @@ impl SparseIndex {
         let path = path.as_ref();
         let tmp = temp_path(path);
         for p in [path, tmp.as_path()] {
-            if let Ok(meta) = fs::metadata(p) {
-                if meta.is_file() && SourceId::from_metadata(&meta) == self.source {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "refusing to write the index over {}: it has the identity of the indexed source",
-                            p.display()
-                        ),
-                    ));
-                }
+            if let Ok(meta) = fs::metadata(p)
+                && meta.is_file()
+                && SourceId::from_metadata(&meta) == self.source
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing to write the index over {}: it has the identity of the indexed source",
+                        p.display()
+                    ),
+                ));
             }
         }
         if let Some(dir) = path.parent() {

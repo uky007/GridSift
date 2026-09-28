@@ -266,11 +266,10 @@ pub fn enrich_window(ctx: &egui::Context, d: &mut Document) {
             match d.enrich_ui.choice {
                 ProviderChoice::GeoIp => {
                     ui.horizontal(|ui| {
-                        if ui.button("Choose .mmdb…").clicked() {
-                            if let Some(p) = rfd::FileDialog::new().add_filter("MaxMind DB", &["mmdb"]).pick_file() {
+                        if ui.button("Choose .mmdb…").clicked()
+                            && let Some(p) = rfd::FileDialog::new().add_filter("MaxMind DB", &["mmdb"]).pick_file() {
                                 d.enrich_ui.path = Some(p);
                             }
-                        }
                         ui.label(RichText::new(chosen).color(DIM));
                     });
                     ui.label(
@@ -286,14 +285,13 @@ pub fn enrich_window(ctx: &egui::Context, d: &mut Document) {
                 }
                 ProviderChoice::Lookup => {
                     ui.horizontal(|ui| {
-                        if ui.button("Choose CSV…").clicked() {
-                            if let Some(p) = rfd::FileDialog::new()
+                        if ui.button("Choose CSV…").clicked()
+                            && let Some(p) = rfd::FileDialog::new()
                                 .add_filter("Delimited text", &["csv", "tsv", "txt"])
                                 .pick_file()
                             {
                                 d.enrich_ui.path = Some(p);
                             }
-                        }
                         ui.label(RichText::new(chosen).color(DIM));
                     });
                     ui.horizontal(|ui| {

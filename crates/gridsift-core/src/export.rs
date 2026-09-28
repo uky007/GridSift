@@ -341,16 +341,16 @@ pub fn export_pending<'s>(
     let mut tf = Transform::new(opts.redactor, opts.enrichment, index.params.dialect);
 
     let result = (|| -> io::Result<bool> {
-        if opts.include_header {
-            if let Some(h) = index.header {
-                let raw = source.slice(h.start, h.end);
-                if tf.header(raw) {
-                    w.put(&tf.buf)?;
-                } else {
-                    w.put(raw)?;
-                }
-                w.put(term)?;
+        if opts.include_header
+            && let Some(h) = index.header
+        {
+            let raw = source.slice(h.start, h.end);
+            if tf.header(raw) {
+                w.put(&tf.buf)?;
+            } else {
+                w.put(raw)?;
             }
+            w.put(term)?;
         }
         match selection {
             Selection::All => {

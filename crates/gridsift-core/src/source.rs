@@ -184,10 +184,9 @@ impl Source {
         if let (Ok(a), Ok(b)) = (
             std::fs::canonicalize(&self.path),
             std::fs::canonicalize(target),
-        ) {
-            if a == b {
-                return refuse();
-            }
+        ) && a == b
+        {
+            return refuse();
         }
         let Ok(meta) = std::fs::metadata(target) else {
             return Ok(());
@@ -198,10 +197,11 @@ impl Source {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            if let Ok(mine) = self.file.metadata() {
-                if meta.dev() == mine.dev() && meta.ino() == mine.ino() {
-                    return refuse();
-                }
+            if let Ok(mine) = self.file.metadata()
+                && meta.dev() == mine.dev()
+                && meta.ino() == mine.ino()
+            {
+                return refuse();
             }
         }
         if SourceId::from_metadata(&meta) == self.id {

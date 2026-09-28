@@ -1396,10 +1396,10 @@ fn cmd_search(
         }));
     }
     println!("{} matching record(s)", matches.len());
-    if let Some(h) = &header {
-        if !recs.is_empty() {
-            println!("{:>10}  {}", "#", render_fields(h, 24));
-        }
+    if let Some(h) = &header
+        && !recs.is_empty()
+    {
+        println!("{:>10}  {}", "#", render_fields(h, 24));
     }
     for r in &recs {
         r.fields(&src, &idx, &mut fields);
@@ -1445,10 +1445,11 @@ fn ensure_full_index(
     json: bool,
 ) -> Result<SparseIndex> {
     let path = index_location(file, src, params, index_path)?;
-    if let Ok(idx) = usable_index(&path, src, params) {
-        if idx.stats.complete && idx.digests.sha256.is_some() {
-            return Ok(idx);
-        }
+    if let Ok(idx) = usable_index(&path, src, params)
+        && idx.stats.complete
+        && idx.digests.sha256.is_some()
+    {
+        return Ok(idx);
     }
     if !json {
         eprintln!(

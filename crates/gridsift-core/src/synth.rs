@@ -190,10 +190,10 @@ impl Generator {
             for _ in 0..batch {
                 self.write_row(&mut buf);
                 stats.rows += 1;
-                if let Target::Bytes(n) = target {
-                    if stats.bytes + buf.len() as u64 >= n {
-                        break;
-                    }
+                if let Target::Bytes(n) = target
+                    && stats.bytes + buf.len() as u64 >= n
+                {
+                    break;
                 }
             }
             w.write_all(&buf)?;
