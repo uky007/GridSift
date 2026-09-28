@@ -16,6 +16,7 @@
 //! - [`search`]  parallel literal / regex search producing a match bitmap
 //! - [`export`]  atomic, hashed export of a selection to a new file
 //! - [`frequency`] parallel top-N value counts for a column
+//! - [`timeline`] timestamp parsing, time-bucketed counts, time-range selection
 //! - [`semantic`] semantic column typing (ip, domain, hash, timestamp, …)
 //! - [`manifest`] provenance manifest written next to every export
 //! - [`redact`]  export-time column redaction (drop / mask / partial / ip prefix / hmac)
@@ -42,6 +43,7 @@ pub mod sidecar;
 pub mod source;
 pub mod synth;
 pub mod sys;
+pub mod timeline;
 
 pub use dialect::{Bom, Dialect, Sniff};
 pub use hash::{Digests, HashSelection};

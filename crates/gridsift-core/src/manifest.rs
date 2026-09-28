@@ -117,6 +117,15 @@ impl From<Dialect> for DialectInfo {
 pub enum Operation {
     /// A search whose matching records form the selection.
     Search { query: SearchQuery, matches: u64 },
+    /// Records whose timestamp column falls in `from..to` (ISO 8601, UTC,
+    /// `to` exclusive), applied within the previous selection.
+    TimeRange {
+        column: usize,
+        name: String,
+        from: String,
+        to: String,
+        matches: u64,
+    },
     /// Column redaction applied to the output (no secrets recorded).
     Redact { policy: RedactionPolicy },
     /// Derived columns appended from local datasets (identified by hash).

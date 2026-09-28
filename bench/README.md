@@ -147,6 +147,13 @@ GeoIP lookups against a real MMDB were not benchmarked here (no database is
 bundled); the `maxminddb` reader does a lookup in about a microsecond, so
 the cost is dominated by the same scan.
 
+### Timeline (1 GiB, warm cache, 10 threads)
+
+`timeline -c timestamp`: 4,840,035 timestamps parsed and bucketed in
+**0.72 s**; daily buckets over the 144,743 `deny` records in 0.1 s. The
+file spans 56 days, so per-worker second-resolution maps stayed under the
+500,000-entry cap and no coarsening was needed.
+
 ## Still to do
 
 - Cold-cache runs (`sudo purge`), and a 100 GiB run on external storage.

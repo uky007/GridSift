@@ -38,8 +38,8 @@ only on export.
 crates/gridsift-core     engine: source, dialect sniffing, scanner, sparse index,
                          viewport reader, digests, synthetic data
 crates/gridsift-cli      `gridsift` command-line tool (info / index / rows /
-                         search / freq / export / verify / profile / count /
-                         hash / gen)
+                         search / freq / timeline / export / verify / profile /
+                         count / hash / gen)
 crates/gridsift-desktop  `gridsift-desktop`, the egui application: open a file,
                          rows appear immediately, index + SHA-256 build in the
                          background, virtual grid with go-to-row, parallel
@@ -140,6 +140,22 @@ the grid; redaction of a source column does not affect the values derived
 from it (enrichment sees the original bytes). Reverse DNS is deliberately
 absent: without local DNS data there is no offline way to learn a PTR, and a
 resolver query would be network activity.
+
+## Timeline
+
+```
+gridsift timeline proxy.csv -c timestamp                 # auto bucket width
+gridsift timeline proxy.csv -c timestamp -b 1h -s deny   # hourly, over the records matching "deny"
+```
+
+`timeline` parses a timestamp column (ISO 8601 / RFC 3339, `YYYY/MM/DD`,
+Apache CLF, syslog, US-style, Unix epoch in s/ms/µs; naive times are taken
+as UTC) and counts records per bucket on all cores. Workers count at
+one-second resolution and coarsen to minutes, hours or days when a file
+spans too much time for the memory cap, so memory stays bounded whatever
+the range. In the desktop app the chart is interactive: drag a range and
+**Filter to range** turns it into a selection (nested inside the current
+one), recorded in the manifest as a `time_range` operation.
 
 ## Value counts
 

@@ -229,7 +229,12 @@ impl MatchSet {
         self.bits.iter()
     }
 
-    fn union_with(&mut self, other: &RoaringTreemap) {
+    /// Keep only the records also present in `other` (nested selections).
+    pub fn intersect_with(&mut self, other: &MatchSet) {
+        self.bits &= &other.bits;
+    }
+
+    pub(crate) fn union_with(&mut self, other: &RoaringTreemap) {
         self.bits |= other;
     }
 }

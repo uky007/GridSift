@@ -30,7 +30,8 @@ use gridsift_core::search::{PatternKind, SearchOptions, SearchQuery, SearchShare
 use gridsift_core::semantic::{ProfileOptions, profile as profile_columns};
 use gridsift_core::sidecar::default_index_path;
 use gridsift_core::synth::{Generator, Profile, Target};
-use gridsift_core::sys::{group_thousands, human_bytes, peak_rss_bytes};
+use gridsift_core::sys::{group_thousands, human_bytes, iso8601_utc, peak_rss_bytes};
+use gridsift_core::timeline::{TimelineOptions, current_year, timeline};
 use gridsift_core::{Dialect, HashSelection, Sniff, Source};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{Value, json};
@@ -230,6 +231,42 @@ enum Cmd {
         index: Option<PathBuf>,
         #[command(flatten)]
         enrich: EnrichArgs,
+    },
+    /// Count records per time bucket of a timestamp column
+    Timeline {
+        file: PathBuf,
+        /// Timestamp column (header name or 0-based index)
+        #[arg(long, short = 'c')]
+        column: String,
+        /// Bucket width: `auto` (default), or e.g. `30s`, `5m`, `1h`, `1d`
+        #[arg(long, short = 'b', default_value = "auto")]
+        bucket: String,
+        /// Maximum buckets for `auto`
+        #[arg(long, default_value_t = 60)]
+        max_buckets: usize,
+        #[command(flatten)]
+        dialect: DialectArgs,
+        /// Count only records matching this pattern (whole record)
+        #[arg(long, short = 's')]
+        search: Option<String>,
+        /// Interpret the pattern as a regular expression
+        #[arg(long, short = 'r', requires = "search")]
+        regex: bool,
+        /// Case-insensitive matching
+        #[arg(long, short = 'i', requires = "search")]
+        ignore_case: bool,
+        /// Count the records that do NOT match
+        #[arg(long, short = 'v', requires = "search")]
+        invert: bool,
+        /// Year assumed for timestamps without one (syslog); default: this year
+        #[arg(long)]
+        year: Option<i64>,
+        /// Worker threads (0 = all cores)
+        #[arg(long, default_value_t = 0)]
+        threads: usize,
+        /// Index to use (default: the user cache directory)
+        #[arg(long)]
+        index: Option<PathBuf>,
     },
     /// Detect what each column holds (ip, domain, hash, timestamp, …) from a sample
     Profile {
@@ -570,6 +607,36 @@ fn main() {
                 threads,
                 index_path: index,
                 enrich,
+            },
+            json,
+        ),
+        Cmd::Timeline {
+            file,
+            column,
+            bucket,
+            max_buckets,
+            dialect,
+            search,
+            regex,
+            ignore_case,
+            invert,
+            year,
+            threads,
+            index,
+        } => cmd_timeline(
+            &file,
+            &dialect,
+            TimelineArgs {
+                column,
+                bucket,
+                max_buckets,
+                search,
+                regex,
+                ignore_case,
+                invert,
+                year,
+                threads,
+                index_path: index,
             },
             json,
         ),
@@ -1723,6 +1790,16 @@ fn cmd_verify(
         );
         for op in &m.operations {
             match op {
+                Operation::TimeRange {
+                    name,
+                    column,
+                    from,
+                    to,
+                    matches,
+                } => println!(
+                    "            time range {name} (column {column}) in [{from}, {to}) → {} matches",
+                    group_thousands(*matches)
+                ),
                 Operation::Enrich { rules } => {
                     for r in rules {
                         let ds = r.dataset.as_ref().map_or(String::new(), |d| {
@@ -2078,4 +2155,178 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
         human_bytes(rss)
     );
     Ok(())
+}
+
+struct TimelineArgs {
+    column: String,
+    bucket: String,
+    max_buckets: usize,
+    search: Option<String>,
+    regex: bool,
+    ignore_case: bool,
+    invert: bool,
+    year: Option<i64>,
+    threads: usize,
+    index_path: Option<PathBuf>,
+}
+
+/// `auto`, or a number with an `s`/`m`/`h`/`d` suffix, in seconds.
+fn parse_bucket(spec: &str) -> Result<Option<i64>> {
+    let s = spec.trim().to_ascii_lowercase();
+    if s == "auto" {
+        return Ok(None);
+    }
+    let (num, mult) = match s.chars().last() {
+        Some('s') => (&s[..s.len() - 1], 1),
+        Some('m') => (&s[..s.len() - 1], 60),
+        Some('h') => (&s[..s.len() - 1], 3600),
+        Some('d') => (&s[..s.len() - 1], 86_400),
+        Some(c) if c.is_ascii_digit() => (s.as_str(), 1),
+        _ => bail!("bucket must be `auto` or like `30s`, `5m`, `1h`, `1d`"),
+    };
+    let n: i64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid bucket {spec:?}"))?;
+    if n <= 0 {
+        bail!("bucket must be positive");
+    }
+    Ok(Some(n * mult))
+}
+
+fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) -> Result<()> {
+    let src = open(file)?;
+    let (sn, dialect) = resolve_dialect(&src, args)?;
+    let params = IndexParams {
+        dialect,
+        scan_start: sn.scan_start,
+        ..IndexParams::default()
+    };
+    let (idx, from_index) = load_index(file, &src, params, o.index_path)?;
+    if !from_index && !json {
+        eprintln!(
+            "note: no index for this file; scanning sequentially (run `gridsift index` first for a parallel scan)"
+        );
+    }
+    let header = header_fields(&src, &idx);
+    let column = resolve_columns(std::slice::from_ref(&o.column), header.as_deref())?
+        .and_then(|c| c.first().copied())
+        .expect("one column");
+    let column_name = header
+        .as_ref()
+        .and_then(|h| h.get(column))
+        .map(|f| field_str(f).into_owned())
+        .unwrap_or_else(|| format!("col{column}"));
+    let width_spec = parse_bucket(&o.bucket)?;
+
+    let matches = match &o.search {
+        Some(pattern) => Some(search_matches(
+            &src,
+            &idx,
+            &SearchQuery {
+                pattern: pattern.clone(),
+                kind: if o.regex {
+                    PatternKind::Regex
+                } else {
+                    PatternKind::Literal
+                },
+                case_insensitive: o.ignore_case,
+                columns: None,
+                invert: o.invert,
+            },
+            o.threads,
+            json,
+        )?),
+        None => None,
+    };
+    let selection = match &matches {
+        Some(m) => Selection::Matches(m),
+        None => Selection::All,
+    };
+
+    let shared = FrequencyShared::new(src.len());
+    let opts = TimelineOptions {
+        column,
+        threads: o.threads,
+        reference_year: o.year.unwrap_or_else(current_year),
+        ..TimelineOptions::default()
+    };
+    let pb = progress_bar(src.len(), json);
+    let t = std::thread::scope(|s| {
+        let h = s.spawn(|| timeline(&src, &idx, selection, opts, &shared));
+        while !h.is_finished() {
+            pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.join().expect("timeline thread")
+    })
+    .context("timeline")?;
+    pb.finish_and_clear();
+    if !t.complete {
+        bail!("timeline did not complete");
+    }
+    let width = width_spec.unwrap_or_else(|| t.auto_width(o.max_buckets));
+    let buckets = t.rebucket(width);
+    let fmt = |secs: i64| {
+        if secs < 0 {
+            format!("{secs}")
+        } else {
+            iso8601_utc(secs as u64)
+        }
+    };
+
+    if json {
+        return print_json(&json!({
+            "file": file.display().to_string(),
+            "column": column,
+            "column_name": column_name,
+            "search": o.search,
+            "counted": t.counted,
+            "parsed": t.parsed,
+            "unparsed": t.unparsed,
+            "min": t.min.map(fmt),
+            "max": t.max.map(fmt),
+            "base_resolution_s": t.resolution,
+            "bucket_s": width,
+            "buckets": buckets.iter().map(|&(s, c)| json!({"start": fmt(s), "start_unix": s, "count": c})).collect::<Vec<_>>(),
+            "elapsed_s": t.elapsed.as_secs_f64(),
+            "threads": t.threads,
+        }));
+    }
+    println!(
+        "{column_name}: {} parsed, {} unparseable · {} … {} · bucket {}",
+        group_thousands(t.parsed),
+        group_thousands(t.unparsed),
+        t.min.map_or("-".into(), fmt),
+        t.max.map_or("-".into(), fmt),
+        human_duration(width)
+    );
+    let max = buckets.iter().map(|b| b.1).max().unwrap_or(1).max(1);
+    for (start, count) in &buckets {
+        let bar = "█".repeat((count * 40 / max) as usize);
+        println!("{}  {:>12}  {bar}", fmt(*start), group_thousands(*count));
+    }
+    eprintln!(
+        "({} records, {:.2} s, {} thread(s){})",
+        group_thousands(t.counted),
+        t.elapsed.as_secs_f64(),
+        t.threads,
+        if t.resolution > 1 {
+            format!(
+                "; base resolution coarsened to {}",
+                human_duration(t.resolution)
+            )
+        } else {
+            String::new()
+        }
+    );
+    Ok(())
+}
+
+fn human_duration(secs: i64) -> String {
+    match secs {
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
 }

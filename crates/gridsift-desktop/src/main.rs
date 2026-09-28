@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align, Color32, Key, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
+use egui_plot::{Bar, BarChart, Plot, PlotPoints, Polygon};
 use gridsift_core::dialect::sniff;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, ExportReport, Selection, export};
@@ -35,7 +36,10 @@ use gridsift_core::search::{
 };
 use gridsift_core::semantic::{Profile, ProfileOptions, SemanticType, profile, profile_rows};
 use gridsift_core::sidecar::default_index_path;
-use gridsift_core::sys::{boost_current_thread, group_thousands, human_bytes, peak_rss_bytes};
+use gridsift_core::sys::{
+    boost_current_thread, group_thousands, human_bytes, iso8601_utc, peak_rss_bytes,
+};
+use gridsift_core::timeline::{TimelineOptions, TimelineResult, select_time_range, timeline};
 use gridsift_core::{HashSelection, Source};
 
 const ROW_HEIGHT: f32 = 18.0;
@@ -68,6 +72,8 @@ struct Launch {
     count: Option<usize>,
     /// Column indexes to enrich with the public suffix list on launch.
     domain: Vec<usize>,
+    /// Build the timeline of the detected timestamp column on launch.
+    timeline: bool,
 }
 
 fn parse_args() -> Launch {
@@ -78,6 +84,7 @@ fn parse_args() -> Launch {
         filter: false,
         count: None,
         domain: Vec::new(),
+        timeline: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -86,6 +93,7 @@ fn parse_args() -> Launch {
             "--regex" => l.regex = true,
             "--filter" => l.filter = true,
             "--count" => l.count = args.next().and_then(|c| c.parse().ok()),
+            "--timeline" => l.timeline = true,
             "--domain" => l
                 .domain
                 .extend(args.next().and_then(|c| c.parse::<usize>().ok())),
@@ -138,6 +146,9 @@ fn main() -> Result<(), eframe::Error> {
                 if let (Some(d), Some(column)) = (&mut app.doc, launch.count) {
                     d.freq_column = column;
                     d.start_freq();
+                }
+                if let (Some(d), true) = (&mut app.doc, launch.timeline) {
+                    d.start_timeline();
                 }
             }
             Ok(Box::new(app))
@@ -273,8 +284,61 @@ impl SearchUi {
     }
 }
 
+/// One step of the current selection.
+#[derive(Clone, Debug)]
+enum SelectionOp {
+    Search(SearchQuery),
+    /// Records whose timestamp column is in `from..to` (Unix seconds).
+    TimeRange {
+        column: usize,
+        name: String,
+        from: i64,
+        to: i64,
+    },
+}
+
+impl SelectionOp {
+    fn describe(&self) -> String {
+        match self {
+            SelectionOp::Search(q) => match q.kind {
+                PatternKind::Regex => format!("/{}/", q.pattern),
+                PatternKind::Literal => format!("{:?}", q.pattern),
+            },
+            SelectionOp::TimeRange { name, from, to, .. } => format!(
+                "{name} in [{}, {})",
+                iso8601_utc((*from).max(0) as u64),
+                iso8601_utc((*to).max(0) as u64)
+            ),
+        }
+    }
+
+    fn manifest(&self, matches: u64) -> Operation {
+        match self {
+            SelectionOp::Search(q) => Operation::Search {
+                query: q.clone(),
+                matches,
+            },
+            SelectionOp::TimeRange {
+                column,
+                name,
+                from,
+                to,
+            } => Operation::TimeRange {
+                column: *column,
+                name: name.clone(),
+                from: iso8601_utc((*from).max(0) as u64),
+                to: iso8601_utc((*to).max(0) as u64),
+                matches,
+            },
+        }
+    }
+}
+
+/// The current selection: a scan producing a match set, possibly nested in
+/// earlier selections (whose steps and counts are kept for the manifest).
 struct Search {
-    query: SearchQuery,
+    parents: Vec<(SelectionOp, u64)>,
+    op: SelectionOp,
     shared: Arc<SearchShared>,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<SearchOutcome>>,
@@ -300,12 +364,26 @@ impl Search {
         done / self.started.elapsed().as_secs_f64().max(1e-3)
     }
 
+    /// All steps as manifest operations, in application order.
+    fn ops(&self) -> Vec<Operation> {
+        let mut ops: Vec<Operation> = self.parents.iter().map(|(op, n)| op.manifest(*n)).collect();
+        ops.push(self.op.manifest(self.shared.match_count()));
+        ops
+    }
+
+    /// Lineage for a selection nested inside this one.
+    fn lineage(&self) -> Vec<(SelectionOp, u64)> {
+        let mut p = self.parents.clone();
+        p.push((self.op.clone(), self.shared.match_count()));
+        p
+    }
+
     fn status_line(&self) -> String {
         let n = group_thousands(self.shared.match_count());
-        let what = match self.query.kind {
-            PatternKind::Regex => format!("/{}/", self.query.pattern),
-            PatternKind::Literal => format!("{:?}", self.query.pattern),
-        };
+        let mut what = self.op.describe();
+        if let Some((parent, _)) = self.parents.last() {
+            what = format!("{what} within {}", parent.describe());
+        }
         match &self.outcome {
             None => format!(
                 "{what}: {n} matches · scanning {:.0}% · {}/s",
@@ -335,6 +413,53 @@ struct ExportJob {
     expected: u64,
     cancel: Arc<AtomicBool>,
     out: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// background timeline
+
+struct TimelineJob {
+    shared: Arc<FrequencyShared>,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<std::io::Result<TimelineResult>>>,
+    column: usize,
+}
+
+struct TimelineView {
+    column: usize,
+    result: TimelineResult,
+    /// Display bucket width in seconds.
+    width: i64,
+    auto: bool,
+    bars: Vec<(i64, u64)>,
+    /// Selected time range in plot coordinates (Unix seconds).
+    sel: Option<(f64, f64)>,
+    drag_from: Option<f64>,
+}
+
+impl TimelineView {
+    fn set_width(&mut self, width: Option<i64>) {
+        match width {
+            Some(w) => {
+                self.width = w.max(self.result.resolution);
+                self.auto = false;
+            }
+            None => {
+                self.width = self.result.auto_width(120);
+                self.auto = true;
+            }
+        }
+        self.bars = self.result.rebucket(self.width);
+    }
+
+    /// The selection snapped outwards to bucket boundaries.
+    fn snapped(&self) -> Option<(i64, i64)> {
+        let (a, b) = self.sel?;
+        let w = self.width as f64;
+        let from = (a / w).floor() as i64 * self.width;
+        let to = (b / w).ceil() as i64 * self.width;
+        (to > from).then_some((from, to))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +786,10 @@ struct Document {
     /// Column typing: from the probe rows at first, file-wide once indexed.
     profile: Option<Profile>,
     profile_job: Option<JoinHandle<Profile>>,
+    /// Timestamp column for the timeline.
+    time_column: usize,
+    timeline_job: Option<TimelineJob>,
+    timeline: Option<TimelineView>,
     /// Column selected for value counting.
     freq_column: usize,
     freq_job: Option<FreqJob>,
@@ -724,6 +853,11 @@ impl Document {
         };
         let col_widths = column_widths(&header, (0..200).filter_map(|r| cache.get(r)));
         let quick_profile = profile_rows(&header, (0..probed as u64).filter_map(|r| cache.get(r)));
+        let time_column = quick_profile
+            .columns
+            .iter()
+            .find(|c| c.detected == SemanticType::Timestamp)
+            .map_or(0, |c| c.index);
         let first_rows_in = t0.elapsed();
 
         // With a complete index already on disk there is no build to wait
@@ -757,6 +891,9 @@ impl Document {
             export: None,
             profile: Some(quick_profile),
             profile_job,
+            time_column,
+            timeline_job: None,
+            timeline: None,
             freq_column: 0,
             freq_job: None,
             freq: None,
@@ -827,9 +964,25 @@ impl Document {
     }
 
     /// Compile the search bar's query and start it on worker threads.
+    /// The selection a new scan nests in: the current matches when the
+    /// filtered view is on, else everything. Returns the base match set and
+    /// the lineage to record.
+    fn nesting_base(
+        &self,
+    ) -> (
+        Option<gridsift_core::search::MatchSet>,
+        Vec<(SelectionOp, u64)>,
+    ) {
+        match (&self.search, self.search_ui.filter) {
+            (Some(s), true) if !s.running() => (
+                Some(s.shared.matches.lock().expect("match set").clone()),
+                s.lineage(),
+            ),
+            _ => (None, Vec::new()),
+        }
+    }
+
     fn start_search(&mut self, ctx: &egui::Context) {
-        self.cancel_search();
-        self.search = None;
         self.search_ui.error = None;
         let query = self.search_ui.query();
         let compiled = match query.compile(self.params.dialect) {
@@ -846,6 +999,9 @@ impl Document {
             Ok(i) => i.clone(),
             Err(_) => return,
         };
+        let (base, parents) = self.nesting_base();
+        self.cancel_search();
+        self.search = None;
         let shared = Arc::new(SearchShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (source, s2, c2, ctx2) = (
@@ -862,18 +1018,151 @@ impl Document {
                     ..SearchOptions::default()
                 };
                 let out = search(&source, &index, &compiled, opts, &s2);
+                if let Some(base) = &base {
+                    if let Ok(mut m) = s2.matches.lock() {
+                        m.intersect_with(base);
+                    }
+                }
                 ctx2.request_repaint();
                 out
             })
             .expect("spawn search thread");
         self.search = Some(Search {
-            query,
+            parents,
+            op: SelectionOp::Search(query),
             shared,
             cancel,
             handle: Some(handle),
             outcome: None,
             started: Instant::now(),
         });
+    }
+
+    /// Select the records whose `column` timestamp is in `from..to`, within
+    /// the current selection when the filtered view is on.
+    fn start_time_range(&mut self, ctx: &egui::Context, column: usize, from: i64, to: i64) {
+        let index = match self.index.read() {
+            Ok(i) => i.clone(),
+            Err(_) => return,
+        };
+        let (base, parents) = self.nesting_base();
+        self.cancel_search();
+        self.search = None;
+        let shared = Arc::new(SearchShared::new(self.source.len()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (source, s2, c2, ctx2) = (
+            self.source.clone(),
+            shared.clone(),
+            cancel.clone(),
+            ctx.clone(),
+        );
+        let handle = std::thread::Builder::new()
+            .name("gridsift-timerange".into())
+            .spawn(move || {
+                let opts = TimelineOptions {
+                    column,
+                    cancel: Some(&c2),
+                    ..TimelineOptions::default()
+                };
+                let selection = match &base {
+                    Some(m) => Selection::Matches(m),
+                    None => Selection::All,
+                };
+                let out = select_time_range(&source, &index, selection, from, to, opts, &s2);
+                ctx2.request_repaint();
+                out.unwrap_or_else(|e| SearchOutcome {
+                    complete: false,
+                    records_scanned: 0,
+                    bytes_scanned: 0,
+                    elapsed: Duration::ZERO,
+                    ranges: 0,
+                    threads: 0,
+                    error: Some(e.to_string()),
+                })
+            })
+            .expect("spawn time-range thread");
+        self.search = Some(Search {
+            parents,
+            op: SelectionOp::TimeRange {
+                column,
+                name: self.column_name(column),
+                from,
+                to,
+            },
+            shared,
+            cancel,
+            handle: Some(handle),
+            outcome: None,
+            started: Instant::now(),
+        });
+        self.search_ui.filter = true;
+    }
+
+    /// Count records per time bucket of `time_column` over the current view.
+    fn start_timeline(&mut self) {
+        if let Some(j) = &self.timeline_job {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+        let index = match self.index.read() {
+            Ok(i) => i.clone(),
+            Err(_) => return,
+        };
+        let (matches, _) = self.nesting_base();
+        let shared = Arc::new(FrequencyShared::new(self.source.len()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let column = self.time_column;
+        let (source, s2, c2) = (self.source.clone(), shared.clone(), cancel.clone());
+        let handle = std::thread::Builder::new()
+            .name("gridsift-timeline".into())
+            .spawn(move || {
+                let selection = match &matches {
+                    Some(m) => Selection::Matches(m),
+                    None => Selection::All,
+                };
+                let opts = TimelineOptions {
+                    column,
+                    cancel: Some(&c2),
+                    ..TimelineOptions::default()
+                };
+                timeline(&source, &index, selection, opts, &s2)
+            })
+            .expect("spawn timeline thread");
+        self.timeline_job = Some(TimelineJob {
+            shared,
+            cancel,
+            handle: Some(handle),
+            column,
+        });
+    }
+
+    fn poll_timeline(&mut self) {
+        let Some(job) = &mut self.timeline_job else {
+            return;
+        };
+        if !job.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        let handle = job.handle.take().expect("handle present until joined");
+        let column = job.column;
+        self.timeline_job = None;
+        match handle.join() {
+            Ok(Ok(result)) if result.complete => {
+                let width = result.auto_width(120);
+                let bars = result.rebucket(width);
+                self.timeline = Some(TimelineView {
+                    column,
+                    result,
+                    width,
+                    auto: true,
+                    bars,
+                    sel: None,
+                    drag_from: None,
+                });
+            }
+            Ok(Ok(_)) => self.status = Some("timeline cancelled".into()),
+            Ok(Err(e)) => self.status = Some(format!("timeline failed: {e}")),
+            Err(_) => self.status = Some("timeline thread panicked".into()),
+        }
     }
 
     /// Re-profile from positions across the whole file, off the UI thread.
@@ -1063,10 +1352,7 @@ impl Document {
             match (&self.search, use_matches) {
                 (Some(s), true) => {
                     let m = s.shared.matches.lock().expect("match set").clone();
-                    let ops = vec![Operation::Search {
-                        query: s.query.clone(),
-                        matches: m.len(),
-                    }];
+                    let ops = s.ops();
                     (Some(m), ops)
                 }
                 _ => (None, Vec::new()),
@@ -1237,6 +1523,9 @@ impl App {
             if let Some(j) = &d.freq_job {
                 j.cancel.store(true, Ordering::Relaxed);
             }
+            if let Some(j) = &d.timeline_job {
+                j.cancel.store(true, Ordering::Relaxed);
+            }
         }
         self.doc = None;
     }
@@ -1270,6 +1559,10 @@ impl eframe::App for App {
             d.poll_export();
             d.poll_profile();
             d.poll_freq();
+            d.poll_timeline();
+            if d.timeline_job.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             if let Some((column, value)) = d.pending_pivot.take() {
                 d.search_ui.pattern = value;
                 d.search_ui.column = Some(column);
@@ -1400,6 +1693,10 @@ impl eframe::App for App {
 
         if let Some(d) = &mut self.doc {
             freq_panel(ctx, d);
+            let range = timeline_panel(ctx, d);
+            if let Some((column, from, to)) = range {
+                d.start_time_range(ctx, column, from, to);
+            }
             export_window(ctx, d);
             enrich_window(ctx, d);
         }
@@ -1633,6 +1930,20 @@ fn search_bar(ui: &mut egui::Ui, ctx: &egui::Context, d: &mut Document) {
             d.start_freq();
         }
         ui.label(RichText::new(scope).weak());
+        ui.separator();
+        ui.label(RichText::new("Timeline of").weak());
+        let tname = d.column_name(d.time_column);
+        egui::ComboBox::from_id_salt("time-column")
+            .selected_text(tname)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for (i, name) in d.header.iter().enumerate() {
+                    ui.selectable_value(&mut d.time_column, i, name);
+                }
+            });
+        if ui.button("Timeline").clicked() {
+            d.start_timeline();
+        }
     });
 
     if let Some(e) = &d.search_ui.error {
@@ -2259,6 +2570,178 @@ fn enrich_window(ctx: &egui::Context, d: &mut Document) {
     }
     if !open || close {
         d.enrich_ui.open = false;
+    }
+}
+
+/// Axis / tooltip label for a Unix-seconds x value.
+fn time_label(secs: f64, width: i64) -> String {
+    if secs < 0.0 {
+        return format!("{secs:.0}");
+    }
+    let iso = iso8601_utc(secs as u64);
+    if width >= 86_400 {
+        iso[..10].to_string()
+    } else {
+        format!("{} {}", &iso[5..10], &iso[11..16])
+    }
+}
+
+/// Bottom panel with the time distribution; a drag on the plot selects a
+/// range. Returns `(column, from, to)` when the analyst asks to filter to
+/// the selected range.
+fn timeline_panel(ctx: &egui::Context, d: &mut Document) -> Option<(usize, i64, i64)> {
+    if d.timeline.is_none() && d.timeline_job.is_none() {
+        return None;
+    }
+    let mut close = false;
+    let mut cancel = false;
+    let mut filter_to: Option<(usize, i64, i64)> = None;
+    let mut new_width: Option<Option<i64>> = None;
+    egui::TopBottomPanel::bottom("timeline")
+        .resizable(true)
+        .default_height(260.0)
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if let Some(job) = &d.timeline_job {
+                    ui.label(format!("timeline of {}…", d.column_name(job.column)));
+                    ui.add(egui::ProgressBar::new(job.shared.fraction()).desired_width(160.0));
+                    if ui.small_button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                } else if let Some(v) = &d.timeline {
+                    let r = &v.result;
+                    ui.strong(d.column_name(v.column));
+                    ui.label(format!(
+                        "{} parsed · {} unparseable · {} … {} · {:.2} s",
+                        group_thousands(r.parsed),
+                        group_thousands(r.unparsed),
+                        r.min.map_or("-".into(), |t| time_label(t as f64, 1)),
+                        r.max.map_or("-".into(), |t| time_label(t as f64, 1)),
+                        r.elapsed.as_secs_f64()
+                    ));
+                    ui.separator();
+                    ui.label(RichText::new("bucket").weak());
+                    let current = if v.auto {
+                        format!("auto ({})", human_width(v.width))
+                    } else {
+                        human_width(v.width)
+                    };
+                    egui::ComboBox::from_id_salt("timeline-width")
+                        .selected_text(current)
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(v.auto, "auto").clicked() {
+                                new_width = Some(None);
+                            }
+                            for w in [60i64, 300, 900, 3600, 21_600, 86_400, 604_800] {
+                                if w >= r.resolution
+                                    && ui
+                                        .selectable_label(!v.auto && v.width == w, human_width(w))
+                                        .clicked()
+                                {
+                                    new_width = Some(Some(w));
+                                }
+                            }
+                        });
+                    if let Some((from, to)) = v.snapped() {
+                        ui.separator();
+                        ui.label(
+                            RichText::new(format!(
+                                "selected {} → {}",
+                                time_label(from as f64, 1),
+                                time_label(to as f64, 1)
+                            ))
+                            .color(MATCH_TEXT),
+                        );
+                        if ui.button("Filter to range").clicked() {
+                            filter_to = Some((v.column, from, to));
+                        }
+                    } else {
+                        ui.label(RichText::new("drag on the chart to select a range").weak());
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("✕").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if let Some(v) = &mut d.timeline {
+                let width = v.width as f64;
+                let ymax = v.bars.iter().map(|b| b.1).max().unwrap_or(1).max(1) as f64;
+                let bars: Vec<Bar> = v
+                    .bars
+                    .iter()
+                    .map(|&(s, c)| Bar::new(s as f64 + width / 2.0, c as f64).width(width * 0.9))
+                    .collect();
+                let w = v.width;
+                let plot = Plot::new("timeline-plot")
+                    .height(ui.available_height().max(120.0))
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .allow_boxed_zoom(false)
+                    .include_y(0.0)
+                    .x_axis_formatter(move |mark, _| time_label(mark.value, w))
+                    .label_formatter(move |_, p| format!("{}\n{:.0}", time_label(p.x, w), p.y));
+                plot.show(ui, |pui| {
+                    pui.bar_chart(BarChart::new("events", bars).color(MATCH_TEXT));
+                    if let Some((a, b)) = v.sel {
+                        pui.polygon(
+                            Polygon::new(
+                                "selection",
+                                PlotPoints::from(vec![[a, 0.0], [b, 0.0], [b, ymax], [a, ymax]]),
+                            )
+                            .fill_color(Color32::from_rgba_unmultiplied(120, 200, 140, 70))
+                            .stroke(egui::Stroke::new(1.0_f32, DERIVED_TEXT)),
+                        );
+                    }
+                    let resp = pui.response().clone();
+                    let pointer = pui.pointer_coordinate();
+                    if resp.drag_started() {
+                        v.drag_from = pointer.map(|p| p.x);
+                    }
+                    if resp.dragged() {
+                        if let (Some(f), Some(p)) = (v.drag_from, pointer) {
+                            v.sel = Some((f.min(p.x), f.max(p.x)));
+                        }
+                    }
+                    if resp.clicked() {
+                        if let Some(p) = pointer {
+                            let s = (p.x / width).floor() * width;
+                            v.sel = Some((s, s + width));
+                        }
+                    }
+                });
+            }
+        });
+    if cancel {
+        if let Some(j) = &d.timeline_job {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    if let (Some(v), Some(w)) = (&mut d.timeline, new_width) {
+        v.set_width(w);
+        v.sel = None;
+    }
+    if close {
+        if let Some(j) = &d.timeline_job {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+        d.timeline_job = None;
+        d.timeline = None;
+    }
+    filter_to
+}
+
+fn human_width(secs: i64) -> String {
+    match secs {
+        s if s % 604_800 == 0 => format!("{}w", s / 604_800),
+        s if s % 86_400 == 0 => format!("{}d", s / 86_400),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
     }
 }
 
