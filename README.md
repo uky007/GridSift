@@ -44,7 +44,8 @@ crates/gridsift-desktop  `gridsift-desktop`, the egui application: open a file,
                          rows appear immediately, index + SHA-256 build in the
                          background, virtual grid with go-to-row, parallel
                          literal/regex search with highlight or filtered view,
-                         value counts with click-to-filter, export with manifest
+                         value counts with click-to-filter, offline enrichment,
+                         export with redaction and manifest
 bench/                   benchmark procedure and baseline numbers
 survey/                  background research the design is based on
 ```
@@ -112,6 +113,33 @@ Export dialog.
 The desktop app and the CLI share the index sidecar (stored under the user
 cache directory, never next to the evidence), so a file indexed by one opens
 instantly in the other.
+
+## Offline enrichment
+
+Derived columns come from local data only — the tool never resolves, fetches
+or phones home:
+
+```
+gridsift freq   proxy.csv -c src_ip.country --geoip src_ip=GeoLite2-Country.mmdb
+gridsift freq   proxy.csv -c host.registrable --domain host
+gridsift export proxy.csv -o out.csv -s beacon \
+    --geoip dst_ip=GeoLite2-ASN.mmdb --domain host --lookup src_ip=assets.csv:ip:owner,site
+```
+
+| provider | derived columns | data |
+|---|---|---|
+| `--geoip COL=FILE.mmdb` | `COL.country`, `COL.city` (city DB) or `COL.asn`, `COL.as_org` (ASN DB) | an MMDB file you import (GeoLite2, DB-IP Lite, …); nothing is bundled because their licences differ |
+| `--domain COL` | `COL.registrable`, `COL.suffix`, `COL.subdomain` | the Public Suffix List snapshot compiled into the `psl` crate |
+| `--lookup COL=FILE.csv:KEY[:V1,V2]` | one column per value column | any local CSV: asset inventory, IOC list, resolver-cache export, analyst mapping |
+
+The manifest records every dataset by name, size, SHA-256 and (for MMDB)
+`database_type` and build time, so `dst_ip.country = JP` is a reproducible
+statement about a specific database, not an unexplained value. Derived
+columns can be counted (`freq`), exported and, in the desktop app, shown in
+the grid; redaction of a source column does not affect the values derived
+from it (enrichment sees the original bytes). Reverse DNS is deliberately
+absent: without local DNS data there is no offline way to learn a PTR, and a
+resolver query would be network activity.
 
 ## Value counts
 

@@ -12,9 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::dialect::Dialect;
+use crate::enrich::Enrichment;
 use crate::hash::{Digests, HashSelection, MultiHasher};
 use crate::index::SparseIndex;
 use crate::reader::{locate_many, stream_records};
+use crate::record::write_field;
 use crate::redact::Redactor;
 use crate::scan::Control;
 use crate::search::MatchSet;
@@ -75,6 +78,8 @@ pub struct ExportOptions<'a> {
     pub overwrite: bool,
     /// Column redaction to apply to every written record (and the header).
     pub redactor: Option<&'a Redactor>,
+    /// Derived columns to append to every written record (and the header).
+    pub enrichment: Option<&'a Enrichment>,
     pub cancel: Option<&'a AtomicBool>,
 }
 
@@ -87,25 +92,100 @@ impl Default for ExportOptions<'_> {
             chunk_size: 8 << 20,
             overwrite: false,
             redactor: None,
+            enrichment: None,
             cancel: None,
         }
     }
 }
 
-/// Write one record (redacted if asked) plus the terminator.
+/// Per-record output transform: redaction of source columns, then derived
+/// columns appended from enrichment (computed from the original values, so
+/// a pseudonymised IP still yields its real country).
+struct Transform<'a> {
+    redactor: Option<&'a Redactor>,
+    enrichment: Option<&'a Enrichment>,
+    dialect: Dialect,
+    buf: Vec<u8>,
+    derived: Vec<Vec<u8>>,
+}
+
+impl<'a> Transform<'a> {
+    fn new(
+        redactor: Option<&'a Redactor>,
+        enrichment: Option<&'a Enrichment>,
+        dialect: Dialect,
+    ) -> Transform<'a> {
+        Transform {
+            redactor,
+            enrichment,
+            dialect,
+            buf: Vec::new(),
+            derived: Vec::new(),
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        self.redactor.is_none() && self.enrichment.is_none()
+    }
+
+    /// Render a data record into `self.buf`. Returns `false` when the record
+    /// passes through untouched (the caller then writes `bytes` itself).
+    fn record(&mut self, bytes: &[u8]) -> bool {
+        if self.is_identity() {
+            return false;
+        }
+        self.buf.clear();
+        match self.redactor {
+            Some(r) => r.render(bytes, &mut self.buf),
+            None => self.buf.extend_from_slice(bytes),
+        }
+        if let Some(e) = self.enrichment {
+            e.compute(bytes, &mut self.derived);
+            for v in &self.derived {
+                self.buf.push(self.dialect.delimiter);
+                write_field(v, self.dialect.delimiter, self.dialect.quote, &mut self.buf);
+            }
+        }
+        true
+    }
+
+    /// Same for the header record: dropped columns vanish, derived names
+    /// are appended.
+    fn header(&mut self, bytes: &[u8]) -> bool {
+        if self.is_identity() {
+            return false;
+        }
+        self.buf.clear();
+        match self.redactor {
+            Some(r) => r.render_header(bytes, &mut self.buf),
+            None => self.buf.extend_from_slice(bytes),
+        }
+        if let Some(e) = self.enrichment {
+            for name in e.derived_names() {
+                self.buf.push(self.dialect.delimiter);
+                write_field(
+                    name.as_bytes(),
+                    self.dialect.delimiter,
+                    self.dialect.quote,
+                    &mut self.buf,
+                );
+            }
+        }
+        true
+    }
+}
+
+/// Write one record (transformed if asked) plus the terminator.
 fn emit<W: Write>(
     w: &mut Tee<W>,
-    redactor: Option<&Redactor>,
-    buf: &mut Vec<u8>,
+    tf: &mut Transform<'_>,
     bytes: &[u8],
     term: &[u8],
 ) -> io::Result<()> {
-    match redactor {
-        Some(r) => {
-            r.render(bytes, buf);
-            w.put(buf)?;
-        }
-        None => w.put(bytes)?,
+    if tf.record(bytes) {
+        w.put(&tf.buf)?;
+    } else {
+        w.put(bytes)?;
     }
     w.put(term)
 }
@@ -159,18 +239,16 @@ pub fn export(
     };
     let term = opts.terminator.bytes();
     let mut records = 0u64;
-    let redactor = opts.redactor;
-    let mut rbuf: Vec<u8> = Vec::new();
+    let mut tf = Transform::new(opts.redactor, opts.enrichment, index.params.dialect);
 
     let result = (|| -> io::Result<bool> {
         if opts.include_header {
             if let Some(h) = index.header {
-                match redactor {
-                    Some(r) => {
-                        r.render_header(source.slice(h.start, h.end), &mut rbuf);
-                        w.put(&rbuf)?;
-                    }
-                    None => w.put(source.slice(h.start, h.end))?,
+                let raw = source.slice(h.start, h.end);
+                if tf.header(raw) {
+                    w.put(&tf.buf)?;
+                } else {
+                    w.put(raw)?;
                 }
                 w.put(term)?;
             }
@@ -189,7 +267,7 @@ pub fn export(
                     opts.chunk_size,
                     opts.cancel,
                     &mut |sp, bytes| {
-                        if let Err(e) = emit(&mut w, redactor, &mut rbuf, bytes, term) {
+                        if let Err(e) = emit(&mut w, &mut tf, bytes, term) {
                             err = Some(e);
                             return Control::Stop;
                         }
@@ -224,7 +302,7 @@ pub fn export(
                             return Control::Stop;
                         }
                         if sp.ordinal >= first {
-                            if let Err(e) = emit(&mut w, redactor, &mut rbuf, bytes, term) {
+                            if let Err(e) = emit(&mut w, &mut tf, bytes, term) {
                                 err = Some(e);
                                 return Control::Stop;
                             }
@@ -256,7 +334,7 @@ pub fn export(
                     }
                     let mut last_end = 0;
                     for r in locate_many(source, index, &batch) {
-                        emit(&mut w, redactor, &mut rbuf, r.raw(source), term)?;
+                        emit(&mut w, &mut tf, r.raw(source), term)?;
                         records += 1;
                         last_end = r.end;
                     }
@@ -479,6 +557,69 @@ mod tests {
         let text = fs::read_to_string(&out).unwrap();
         assert!(text.starts_with("id,host\n4990,"));
         assert!(text.ends_with("4999,ok.example\n"));
+    }
+
+    #[test]
+    fn transforms_apply_in_order() {
+        use crate::enrich::{EnrichRule, Enrichment, Provider};
+        use crate::redact::{RedactMethod, RedactRule, Redactor};
+        let dir = workdir();
+        let data = b"ts,ip,host\n1,10.0.0.1,www.example.co.uk\n2,10.0.0.2,\"a,b.test.org\"\n";
+        let (src, idx) = fixture(&dir, data, 1);
+        let dialect = idx.params.dialect;
+        let enrichment = Enrichment::new(
+            dialect,
+            vec![EnrichRule {
+                column: 2,
+                name: "host".into(),
+                provider: Provider::Domain,
+            }],
+        );
+        let redactor = Redactor::new(
+            dialect,
+            vec![RedactRule {
+                column: 1,
+                name: "ip".into(),
+                method: RedactMethod::Mask {
+                    replacement: "x".into(),
+                },
+            }],
+            None,
+        )
+        .unwrap();
+        let out = dir.join("tf.csv");
+        let opts = ExportOptions {
+            redactor: Some(&redactor),
+            enrichment: Some(&enrichment),
+            ..ExportOptions::default()
+        };
+        export(&src, &idx, Selection::All, opts, &out, &mut |_, _| {}).unwrap();
+        let text = fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            text,
+            "ts,ip,host,host.registrable,host.suffix,host.subdomain\n\
+             1,x,www.example.co.uk,example.co.uk,co.uk,www\n\
+             2,x,\"a,b.test.org\",test.org,org,\"a,b\"\n"
+        );
+        // enrichment alone leaves source bytes untouched
+        let out2 = dir.join("tf2.csv");
+        let opts = ExportOptions {
+            enrichment: Some(&enrichment),
+            ..ExportOptions::default()
+        };
+        export(
+            &src,
+            &idx,
+            Selection::Range { first: 0, count: 1 },
+            opts,
+            &out2,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&out2).unwrap(),
+            "ts,ip,host,host.registrable,host.suffix,host.subdomain\n1,10.0.0.1,www.example.co.uk,example.co.uk,co.uk,www\n"
+        );
     }
 
     #[test]

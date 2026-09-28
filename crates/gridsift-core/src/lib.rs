@@ -19,12 +19,14 @@
 //! - [`semantic`] semantic column typing (ip, domain, hash, timestamp, …)
 //! - [`manifest`] provenance manifest written next to every export
 //! - [`redact`]  export-time column redaction (drop / mask / partial / ip prefix / hmac)
+//! - [`enrich`]  offline enrichment: GeoIP/ASN from imported MMDB, PSL domains, local CSV joins
 //! - [`hash`]    streaming SHA-256 / BLAKE3
 //! - [`sidecar`] where derived files (indexes) are stored
 //! - [`synth`]   deterministic synthetic datasets for benchmarks
 //! - [`sys`]     process probes and formatting helpers for reports
 
 pub mod dialect;
+pub mod enrich;
 pub mod export;
 pub mod frequency;
 pub mod hash;

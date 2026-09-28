@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align, Color32, Key, Modifiers, RichText};
 use egui_extras::{Column, TableBuilder};
 use gridsift_core::dialect::sniff;
+use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, ExportReport, Selection, export};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyResult, FrequencyShared, frequency};
 use gridsift_core::hash::hex;
@@ -44,6 +45,8 @@ const HEADER_HEIGHT: f32 = 34.0;
 const HEADER_TEXT: Color32 = Color32::from_gray(235);
 const ROW_NUMBER_TEXT: Color32 = Color32::from_gray(120);
 const CELL_TEXT: Color32 = Color32::from_gray(210);
+/// Header colour of derived (enrichment) columns.
+const DERIVED_TEXT: Color32 = Color32::from_rgb(120, 200, 140);
 const MATCH_TEXT: Color32 = Color32::from_rgb(255, 200, 80);
 /// Rows fetched around a cache miss (biased forward: scrolling down is common).
 const FETCH_BEFORE: u64 = 64;
@@ -63,6 +66,8 @@ struct Launch {
     filter: bool,
     /// Column index to count on launch.
     count: Option<usize>,
+    /// Column indexes to enrich with the public suffix list on launch.
+    domain: Vec<usize>,
 }
 
 fn parse_args() -> Launch {
@@ -72,6 +77,7 @@ fn parse_args() -> Launch {
         regex: false,
         filter: false,
         count: None,
+        domain: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -80,6 +86,9 @@ fn parse_args() -> Launch {
             "--regex" => l.regex = true,
             "--filter" => l.filter = true,
             "--count" => l.count = args.next().and_then(|c| c.parse().ok()),
+            "--domain" => l
+                .domain
+                .extend(args.next().and_then(|c| c.parse::<usize>().ok())),
             _ if l.file.is_none() => l.file = Some(PathBuf::from(a)),
             _ => {}
         }
@@ -103,7 +112,8 @@ fn main() -> Result<(), eframe::Error> {
         "gridsift",
         options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // Fixed dark theme until the design pass; the grid colours assume it.
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
             let mut app = App::default();
             if let Some(p) = &launch.file {
                 app.open(&cc.egui_ctx, p);
@@ -112,6 +122,18 @@ fn main() -> Result<(), eframe::Error> {
                     d.search_ui.regex = launch.regex;
                     d.search_ui.filter = launch.filter;
                     d.start_search(&cc.egui_ctx);
+                }
+                if let Some(d) = &mut app.doc {
+                    if !launch.domain.is_empty() {
+                        for &c in &launch.domain {
+                            d.enrich_ui.rules.push(EnrichRule {
+                                column: c,
+                                name: d.column_name(c),
+                                provider: Provider::Domain,
+                            });
+                        }
+                        d.apply_enrichment();
+                    }
                 }
                 if let (Some(d), Some(column)) = (&mut app.doc, launch.count) {
                     d.freq_column = column;
@@ -441,6 +463,96 @@ impl ExportUi {
 }
 
 // ---------------------------------------------------------------------------
+// enrichment dialog
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderChoice {
+    GeoIp,
+    Domain,
+    Lookup,
+}
+
+impl ProviderChoice {
+    const ALL: [ProviderChoice; 3] = [
+        ProviderChoice::GeoIp,
+        ProviderChoice::Domain,
+        ProviderChoice::Lookup,
+    ];
+
+    fn label(&self) -> &'static str {
+        match self {
+            ProviderChoice::GeoIp => "GeoIP / ASN (.mmdb)",
+            ProviderChoice::Domain => "Domain (public suffix list)",
+            ProviderChoice::Lookup => "Lookup (local CSV)",
+        }
+    }
+}
+
+/// State of the enrichment dialog: the rules being assembled.
+struct EnrichUi {
+    open: bool,
+    column: usize,
+    choice: ProviderChoice,
+    path: Option<PathBuf>,
+    key: String,
+    values: String,
+    rules: Vec<EnrichRule>,
+    error: Option<String>,
+}
+
+impl Default for EnrichUi {
+    fn default() -> Self {
+        EnrichUi {
+            open: false,
+            column: 0,
+            choice: ProviderChoice::GeoIp,
+            path: None,
+            key: String::new(),
+            values: String::new(),
+            rules: Vec::new(),
+            error: None,
+        }
+    }
+}
+
+/// Build the rule described by the dialog's "add" section (loads the
+/// dataset, which fingerprints it).
+fn build_enrich_rule(ui: &EnrichUi, header: &[String]) -> Result<EnrichRule, String> {
+    let name = header
+        .get(ui.column)
+        .cloned()
+        .unwrap_or_else(|| format!("col{}", ui.column));
+    let provider = match ui.choice {
+        ProviderChoice::Domain => Provider::Domain,
+        ProviderChoice::GeoIp => {
+            let p = ui.path.as_ref().ok_or("choose an .mmdb file")?;
+            let db: Arc<dyn GeoProvider> = Arc::new(GeoIpDb::open(p).map_err(|e| e.to_string())?);
+            Provider::GeoIp(db)
+        }
+        ProviderChoice::Lookup => {
+            let p = ui.path.as_ref().ok_or("choose a CSV file")?;
+            let key = ui.key.trim();
+            if key.is_empty() {
+                return Err("the key column is required".into());
+            }
+            let values: Vec<String> = ui
+                .values
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let t = LookupTable::load(p, key, &values).map_err(|e| e.to_string())?;
+            Provider::Lookup(Arc::new(t))
+        }
+    };
+    Ok(EnrichRule {
+        column: ui.column,
+        name,
+        provider,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // document
 
 /// Decoded rows by record ordinal, filled in windows (contiguous view) or
@@ -465,19 +577,31 @@ impl RowCache {
         }
     }
 
+    /// Decode rows to strings; derived (enrichment) values are appended
+    /// after the source fields.
     fn decode(
         source: &Source,
         index: &SparseIndex,
         recs: &[gridsift_core::Located],
+        enrichment: Option<&Enrichment>,
     ) -> Vec<(u64, Vec<String>)> {
         let mut fields = Vec::new();
+        let mut derived = Vec::new();
         recs.iter()
             .map(|r| {
                 r.fields(source, index, &mut fields);
-                let row = fields
+                let mut row: Vec<String> = fields
                     .iter()
                     .map(|f| String::from_utf8_lossy(f).into_owned())
                     .collect();
+                if let Some(e) = enrichment {
+                    e.compute(r.raw(source), &mut derived);
+                    row.extend(
+                        derived
+                            .iter()
+                            .map(|v| String::from_utf8_lossy(v).into_owned()),
+                    );
+                }
                 (r.record, row)
             })
             .collect()
@@ -488,21 +612,30 @@ impl RowCache {
         &mut self,
         source: &Source,
         index: &SparseIndex,
+        enrichment: Option<&Enrichment>,
         first: u64,
         count: usize,
     ) -> usize {
         self.make_room();
         let recs = locate_records(source, index, first, count);
         let n = recs.len();
-        self.rows.extend(Self::decode(source, index, &recs));
+        self.rows
+            .extend(Self::decode(source, index, &recs, enrichment));
         n
     }
 
     /// Fetch scattered ordinals (sorted, de-duplicated).
-    fn fill_many(&mut self, source: &Source, index: &SparseIndex, ordinals: &[u64]) {
+    fn fill_many(
+        &mut self,
+        source: &Source,
+        index: &SparseIndex,
+        enrichment: Option<&Enrichment>,
+        ordinals: &[u64],
+    ) {
         self.make_room();
         let recs = locate_many(source, index, ordinals);
-        self.rows.extend(Self::decode(source, index, &recs));
+        self.rows
+            .extend(Self::decode(source, index, &recs, enrichment));
     }
 }
 
@@ -535,6 +668,10 @@ struct Document {
     /// A value clicked in the count panel: (column, value) to filter by.
     pending_pivot: Option<(usize, String)>,
     export_ui: ExportUi,
+    /// Offline enrichment producing derived columns after the source ones.
+    enrichment: Option<Arc<Enrichment>>,
+    derived_names: Vec<String>,
+    enrich_ui: EnrichUi,
     /// Open → first rows on screen.
     first_rows_in: Duration,
     index_elapsed: Option<Duration>,
@@ -579,7 +716,7 @@ impl Document {
         };
 
         let mut cache = RowCache::default();
-        let probed = cache.fill_window(&source, &index, 0, PROBE_ROWS);
+        let probed = cache.fill_window(&source, &index, None, 0, PROBE_ROWS);
         let known_rows = if from_sidecar {
             index.stats.records
         } else {
@@ -625,6 +762,9 @@ impl Document {
             freq: None,
             pending_pivot: None,
             export_ui: ExportUi::default(),
+            enrichment: None,
+            derived_names: Vec::new(),
+            enrich_ui: EnrichUi::default(),
             first_rows_in,
             index_elapsed: None,
             index_from_sidecar: from_sidecar,
@@ -774,6 +914,7 @@ impl Document {
         let shared = Arc::new(FrequencyShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let column = self.freq_column;
+        let enrichment = self.enrichment.clone();
         let (source, s2, c2) = (self.source.clone(), shared.clone(), cancel.clone());
         let handle = std::thread::Builder::new()
             .name("gridsift-freq".into())
@@ -785,6 +926,7 @@ impl Document {
                 let opts = FrequencyOptions {
                     column,
                     top: 500,
+                    enrichment: enrichment.as_deref(),
                     cancel: Some(&c2),
                     ..FrequencyOptions::default()
                 };
@@ -833,6 +975,44 @@ impl Document {
             Ok(Err(e)) => self.status = Some(format!("count failed: {e}")),
             Err(_) => self.status = Some("count thread panicked".into()),
         }
+    }
+
+    /// Name of a source or derived column.
+    fn column_name(&self, i: usize) -> String {
+        self.header
+            .get(i)
+            .cloned()
+            .or_else(|| {
+                i.checked_sub(self.header.len())
+                    .and_then(|k| self.derived_names.get(k))
+                    .cloned()
+            })
+            .unwrap_or_else(|| format!("col{i}"))
+    }
+
+    /// Apply the rules assembled in the dialog: derived columns appear in
+    /// the grid, in value counts and in exports.
+    fn apply_enrichment(&mut self) {
+        let rules = self.enrich_ui.rules.clone();
+        if rules.is_empty() {
+            self.enrichment = None;
+            self.derived_names.clear();
+        } else {
+            let e = Enrichment::new(self.params.dialect, rules);
+            self.derived_names = e.derived_names();
+            self.enrichment = Some(Arc::new(e));
+        }
+        self.col_widths.truncate(self.header.len());
+        self.col_widths.extend(
+            self.derived_names
+                .iter()
+                .map(|n| (n.chars().count() as f32 * 7.4 + 24.0).clamp(80.0, 300.0)),
+        );
+        self.cache = RowCache::default();
+        if self.freq_column >= self.header.len() + self.derived_names.len() {
+            self.freq_column = 0;
+        }
+        self.freq = None;
     }
 
     fn poll_export(&mut self) {
@@ -892,6 +1072,7 @@ impl Document {
                 _ => (None, Vec::new()),
             };
         let expected = matches.as_ref().map_or(index.stats.records, |m| m.len());
+        let enrichment = self.enrichment.clone();
         let records = Arc::new(AtomicU64::new(0));
         let cancel = Arc::new(AtomicBool::new(false));
         let (source, r2, c2, out2) = (
@@ -917,6 +1098,9 @@ impl Document {
                     )
                 };
                 let mut operations = operations;
+                if let Some(e) = &enrichment {
+                    operations.push(Operation::Enrich { rules: e.info() });
+                }
                 if let Some(r) = &redactor {
                     operations.push(Operation::Redact {
                         policy: r.policy().clone(),
@@ -925,6 +1109,7 @@ impl Document {
                 let opts = ExportOptions {
                     overwrite: true,
                     redactor: redactor.as_ref(),
+                    enrichment: enrichment.as_deref(),
                     cancel: Some(&c2),
                     ..ExportOptions::default()
                 };
@@ -955,10 +1140,11 @@ impl Document {
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_default(),
                         format: "csv".into(),
-                        content: if redactor.is_some() {
-                            "records-redacted"
-                        } else {
-                            "raw-records"
+                        content: match (redactor.is_some(), enrichment.is_some()) {
+                            (false, false) => "raw-records",
+                            (true, false) => "records-redacted",
+                            (false, true) => "records-enriched",
+                            (true, true) => "records-redacted-enriched",
                         }
                         .into(),
                         header: index.header.is_some(),
@@ -1136,6 +1322,15 @@ impl eframe::App for App {
                     if resp.clicked() {
                         d.export_ui.show(filtered, d.header.len());
                     }
+                    let enrich_label = if d.enrichment.is_some() {
+                        format!("Enrich… ({} derived)", d.derived_names.len())
+                    } else {
+                        "Enrich…".to_string()
+                    };
+                    if ui.button(enrich_label).clicked() {
+                        d.enrich_ui.open = true;
+                        d.enrich_ui.error = None;
+                    }
                 }
                 ui.separator();
                 match &self.doc {
@@ -1206,6 +1401,7 @@ impl eframe::App for App {
         if let Some(d) = &mut self.doc {
             freq_panel(ctx, d);
             export_window(ctx, d);
+            enrich_window(ctx, d);
         }
 
         egui::CentralPanel::default()
@@ -1419,16 +1615,12 @@ fn search_bar(ui: &mut egui::Ui, ctx: &egui::Context, d: &mut Document) {
 
     ui.horizontal(|ui| {
         ui.label(RichText::new("Count values of").weak());
-        let name = d
-            .header
-            .get(d.freq_column)
-            .cloned()
-            .unwrap_or_else(|| format!("col{}", d.freq_column));
+        let name = d.column_name(d.freq_column);
         egui::ComboBox::from_id_salt("freq-column")
             .selected_text(name)
             .width(200.0)
             .show_ui(ui, |ui| {
-                for (i, name) in d.header.iter().enumerate() {
+                for (i, name) in d.header.iter().chain(d.derived_names.iter()).enumerate() {
                     ui.selectable_value(&mut d.freq_column, i, name);
                 }
             });
@@ -1490,8 +1682,11 @@ fn grid(ui: &mut egui::Ui, d: &mut Document) {
         known_rows,
         profile,
         path,
+        enrichment,
+        derived_names,
         ..
     } = d;
+    let enrichment = enrichment.as_deref();
     let idx = index.read().expect("index lock");
     // Hold the match set for the frame: `select`/`contains` per visible row.
     let matches = search
@@ -1532,7 +1727,15 @@ fn grid(ui: &mut egui::Ui, d: &mut Document) {
         });
         for c in 0..ncols {
             h.col(|ui| {
-                let name = header.get(c).map_or("", String::as_str);
+                let (name, is_derived) = match header.get(c) {
+                    Some(n) => (n.as_str(), false),
+                    None => (
+                        c.checked_sub(header.len())
+                            .and_then(|k| derived_names.get(k))
+                            .map_or("", String::as_str),
+                        true,
+                    ),
+                };
                 let typed = profile
                     .as_ref()
                     .and_then(|p| p.column(c))
@@ -1540,8 +1743,12 @@ fn grid(ui: &mut egui::Ui, d: &mut Document) {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.add(
-                        egui::Label::new(RichText::new(name).strong().color(HEADER_TEXT))
-                            .truncate(),
+                        egui::Label::new(RichText::new(name).strong().color(if is_derived {
+                            DERIVED_TEXT
+                        } else {
+                            HEADER_TEXT
+                        }))
+                        .truncate(),
                     );
                     let typed = typed.as_deref().unwrap_or("");
                     ui.add(
@@ -1568,12 +1775,13 @@ fn grid(ui: &mut egui::Ui, d: &mut Document) {
                         let ords: Vec<u64> = (k..k + FETCH_FILTERED)
                             .filter_map(|j| m.select(j))
                             .collect();
-                        cache.fill_many(source, &idx, &ords);
+                        cache.fill_many(source, &idx, enrichment, &ords);
                     }
                     _ => {
                         cache.fill_window(
                             source,
                             &idx,
+                            enrichment,
                             r.saturating_sub(FETCH_BEFORE),
                             FETCH_TOTAL,
                         );
@@ -1622,7 +1830,7 @@ fn freq_panel(ctx: &egui::Context, d: &mut Document) {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if let Some(job) = &d.freq_job {
-                    let name = d.header.get(job.column).cloned().unwrap_or_default();
+                    let name = d.column_name(job.column);
                     ui.label(format!("counting {name}…"));
                     ui.add(egui::ProgressBar::new(job.shared.fraction()).desired_width(160.0));
                     if ui.small_button("Cancel").clicked() {
@@ -1630,7 +1838,10 @@ fn freq_panel(ctx: &egui::Context, d: &mut Document) {
                     }
                 } else if let Some(v) = &d.freq {
                     let r = &v.result;
-                    ui.strong(d.header.get(v.column).cloned().unwrap_or_default());
+                    ui.strong(d.column_name(v.column));
+                    if v.column >= d.header.len() {
+                        ui.label(RichText::new("(derived column)").weak());
+                    }
                     ui.label(format!(
                         "{} distinct{} · {} records · {} empty · {:.2} s",
                         group_thousands(r.distinct),
@@ -1720,7 +1931,8 @@ fn freq_panel(ctx: &egui::Context, d: &mut Document) {
                                         .desired_width(ui.available_width().max(40.0)),
                                 );
                             });
-                            if row.response().clicked() {
+                            // derived columns cannot be searched, so no pivot for them
+                            if row.response().clicked() && v.column < d.header.len() {
                                 clicked = Some((v.column, value.clone()));
                             }
                         });
@@ -1872,6 +2084,181 @@ fn export_window(ctx: &egui::Context, d: &mut Document) {
         d.export_ui.open = false;
         d.export_ui.error = None;
         d.start_export(p, filtered, rules, key);
+    }
+}
+
+/// The enrichment dialog: assemble rules, apply them to the document.
+fn enrich_window(ctx: &egui::Context, d: &mut Document) {
+    if !d.enrich_ui.open {
+        return;
+    }
+    let mut open = true;
+    let (mut apply, mut add, mut close) = (false, false, false);
+    let mut remove: Option<usize> = None;
+    egui::Window::new("Enrich")
+        .collapsible(false)
+        .resizable(true)
+        .default_width(680.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(
+                RichText::new(
+                    "Derived columns are computed from local data only and appended after the \
+                     source columns. The manifest records which dataset (by hash) produced them.",
+                )
+                .weak(),
+            );
+            ui.separator();
+            if d.enrich_ui.rules.is_empty() {
+                ui.label(RichText::new("no rules yet").weak());
+            }
+            for (i, r) in d.enrich_ui.rules.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.monospace(&r.name);
+                    ui.label(format!("→ {}", r.provider.label()));
+                    let dataset = match &r.provider {
+                        Provider::GeoIp(p) => {
+                            let info = p.info();
+                            format!(
+                                "{} ({})",
+                                info.name,
+                                info.database_type.as_deref().unwrap_or("mmdb")
+                            )
+                        }
+                        Provider::Lookup(t) => format!("{} ({} keys)", t.info().name, t.len()),
+                        Provider::Domain => {
+                            format!("public suffix list {}", gridsift_core::enrich::PSL_VERSION)
+                        }
+                    };
+                    ui.label(RichText::new(dataset).weak());
+                    if ui.small_button("remove").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            ui.separator();
+            ui.label(RichText::new("Add a rule").strong());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("column").weak());
+                let name = d
+                    .header
+                    .get(d.enrich_ui.column)
+                    .cloned()
+                    .unwrap_or_default();
+                egui::ComboBox::from_id_salt("enrich-column")
+                    .selected_text(name)
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for (i, n) in d.header.iter().enumerate() {
+                            ui.selectable_value(&mut d.enrich_ui.column, i, n);
+                        }
+                    });
+                ui.label(RichText::new("provider").weak());
+                egui::ComboBox::from_id_salt("enrich-provider")
+                    .selected_text(d.enrich_ui.choice.label())
+                    .width(230.0)
+                    .show_ui(ui, |ui| {
+                        for c in ProviderChoice::ALL {
+                            ui.selectable_value(&mut d.enrich_ui.choice, c, c.label());
+                        }
+                    });
+            });
+            let chosen = d
+                .enrich_ui
+                .path
+                .as_ref()
+                .map_or("no file chosen".to_string(), |p| p.display().to_string());
+            match d.enrich_ui.choice {
+                ProviderChoice::GeoIp => {
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose .mmdb…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("MaxMind DB", &["mmdb"])
+                                .pick_file()
+                            {
+                                d.enrich_ui.path = Some(p);
+                            }
+                        }
+                        ui.label(RichText::new(chosen).weak());
+                    });
+                    ui.label(
+                        RichText::new(
+                            "GeoLite2 / DB-IP Lite in MMDB format. Import your own copy — nothing is bundled.",
+                        )
+                        .weak(),
+                    );
+                }
+                ProviderChoice::Domain => {
+                    ui.label(
+                        RichText::new(
+                            "registrable domain, public suffix and subdomain from the bundled \
+                             Public Suffix List snapshot",
+                        )
+                        .weak(),
+                    );
+                }
+                ProviderChoice::Lookup => {
+                    ui.horizontal(|ui| {
+                        if ui.button("Choose CSV…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("Delimited text", &["csv", "tsv", "txt"])
+                                .pick_file()
+                            {
+                                d.enrich_ui.path = Some(p);
+                            }
+                        }
+                        ui.label(RichText::new(chosen).weak());
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("key column").weak());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.enrich_ui.key)
+                                .desired_width(120.0)
+                                .hint_text("name or index"),
+                        );
+                        ui.label(RichText::new("value columns").weak());
+                        ui.add(
+                            egui::TextEdit::singleline(&mut d.enrich_ui.values)
+                                .desired_width(240.0)
+                                .hint_text("comma-separated; empty = all"),
+                        );
+                    });
+                }
+            }
+            if ui.button("Add rule").clicked() {
+                add = true;
+            }
+            if let Some(e) = &d.enrich_ui.error {
+                ui.colored_label(Color32::LIGHT_RED, e);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Apply").clicked() {
+                    apply = true;
+                }
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        });
+    if let Some(i) = remove {
+        d.enrich_ui.rules.remove(i);
+    }
+    if add {
+        match build_enrich_rule(&d.enrich_ui, &d.header) {
+            Ok(r) => {
+                d.enrich_ui.rules.push(r);
+                d.enrich_ui.error = None;
+            }
+            Err(e) => d.enrich_ui.error = Some(e),
+        }
+    }
+    if apply {
+        d.apply_enrichment();
+        d.enrich_ui.open = false;
+    }
+    if !open || close {
+        d.enrich_ui.open = false;
     }
 }
 

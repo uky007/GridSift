@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::enrich::Enrichment;
 use crate::export::Selection;
 use crate::index::{Checkpoint, SparseIndex};
 use crate::reader::{StreamRange, stream_records_range};
@@ -37,6 +38,10 @@ pub struct FrequencyOptions<'a> {
     pub threads: usize,
     pub range_bytes: u64,
     pub chunk_size: usize,
+    /// Lets `column` address a derived column: indexes at or past the
+    /// source width (`index.stats.expected_fields`) refer to
+    /// [`Enrichment::derived_names`] in order.
+    pub enrichment: Option<&'a Enrichment>,
     pub cancel: Option<&'a AtomicBool>,
 }
 
@@ -50,6 +55,7 @@ impl Default for FrequencyOptions<'_> {
             threads: 0,
             range_bytes: 64 << 20,
             chunk_size: 4 << 20,
+            enrichment: None,
             cancel: None,
         }
     }
@@ -240,6 +246,8 @@ pub fn frequency(
     .clamp(1, 64)
     .min(ranges.len().max(1));
     let dialect = index.params.dialect;
+    let base = index.stats.expected_fields as usize;
+    let enrichment = opts.enrichment;
     let next = AtomicUsize::new(0);
     let complete = AtomicBool::new(true);
     let counters: Mutex<Vec<Counter>> = Mutex::new(Vec::new());
@@ -272,9 +280,20 @@ pub fn frequency(
                         },
                         &mut |sp, bytes| {
                             if selection.includes(sp.ordinal) {
-                                let v =
-                                    nth_field(bytes, dialect.delimiter, dialect.quote, opts.column);
-                                c.add(v.as_deref().unwrap_or(b""));
+                                if opts.column >= base {
+                                    match enrichment {
+                                        Some(e) => c.add(&e.value(bytes, opts.column - base)),
+                                        None => c.add(b""),
+                                    }
+                                } else {
+                                    let v = nth_field(
+                                        bytes,
+                                        dialect.delimiter,
+                                        dialect.quote,
+                                        opts.column,
+                                    );
+                                    c.add(v.as_deref().unwrap_or(b""));
+                                }
                             }
                             Control::Continue
                         },

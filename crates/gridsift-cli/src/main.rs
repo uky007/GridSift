@@ -5,14 +5,17 @@
 //! source, unless a path is given explicitly.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gridsift_core::dialect::sniff;
+use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, Selection, Terminator, export};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
 use gridsift_core::hash::{MultiHasher, hash_source, hex};
@@ -179,6 +182,8 @@ enum Cmd {
         /// File holding the HMAC key for `hmac` redactions (or set GRIDSIFT_HMAC_KEY)
         #[arg(long)]
         hmac_key_file: Option<PathBuf>,
+        #[command(flatten)]
+        enrich: EnrichArgs,
     },
     /// Verify an exported file (and its source, if present) against its manifest
     Verify {
@@ -223,6 +228,8 @@ enum Cmd {
         /// Index to use (default: the user cache directory)
         #[arg(long)]
         index: Option<PathBuf>,
+        #[command(flatten)]
+        enrich: EnrichArgs,
     },
     /// Detect what each column holds (ip, domain, hash, timestamp, …) from a sample
     Profile {
@@ -285,6 +292,124 @@ struct DialectArgs {
     /// Force the first record to be treated as a header
     #[arg(long)]
     header: bool,
+}
+
+/// Offline enrichment sources, shared by the commands that can derive columns.
+#[derive(Args, Clone, Debug, Default)]
+struct EnrichArgs {
+    /// Add GeoIP/ASN columns from a local `.mmdb`: `COLUMN=PATH` (repeatable)
+    #[arg(long = "geoip", value_name = "COLUMN=PATH")]
+    geoip: Vec<String>,
+    /// Add registrable-domain / suffix / subdomain columns for a column (repeatable)
+    #[arg(long = "domain", value_name = "COLUMN")]
+    domain: Vec<String>,
+    /// Join a local CSV: `COLUMN=PATH:KEY[:VALUE,VALUE…]` (repeatable)
+    #[arg(long = "lookup", value_name = "COLUMN=PATH:KEY[:VALUES]")]
+    lookup: Vec<String>,
+}
+
+impl EnrichArgs {
+    fn is_empty(&self) -> bool {
+        self.geoip.is_empty() && self.domain.is_empty() && self.lookup.is_empty()
+    }
+}
+
+/// Build the enrichment described by `--geoip/--domain/--lookup`.
+fn build_enrichment(
+    args: &EnrichArgs,
+    dialect: Dialect,
+    header: Option<&[Cow<'_, [u8]>]>,
+) -> Result<Option<Enrichment>> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+    let column_of = |spec: &str| -> Result<(usize, String)> {
+        let c = resolve_columns(&[spec.to_string()], header)?
+            .and_then(|c| c.first().copied())
+            .expect("one column");
+        let name = header
+            .and_then(|h| h.get(c))
+            .map(|f| field_str(f).into_owned())
+            .unwrap_or_else(|| format!("col{c}"));
+        Ok((c, name))
+    };
+    let mut rules = Vec::new();
+    let mut dbs: HashMap<PathBuf, Arc<dyn GeoProvider>> = HashMap::new();
+    for spec in &args.geoip {
+        let (col, path) = spec
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--geoip expects COLUMN=PATH, got {spec:?}"))?;
+        let (column, name) = column_of(col)?;
+        let path = PathBuf::from(path);
+        let db = match dbs.get(&path) {
+            Some(db) => db.clone(),
+            None => {
+                let db: Arc<dyn GeoProvider> = Arc::new(
+                    GeoIpDb::open(&path).with_context(|| format!("loading {}", path.display()))?,
+                );
+                dbs.insert(path.clone(), db.clone());
+                db
+            }
+        };
+        rules.push(EnrichRule {
+            column,
+            name,
+            provider: Provider::GeoIp(db),
+        });
+    }
+    for spec in &args.domain {
+        let (column, name) = column_of(spec)?;
+        rules.push(EnrichRule {
+            column,
+            name,
+            provider: Provider::Domain,
+        });
+    }
+    for spec in &args.lookup {
+        let (col, rest) = spec.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--lookup expects COLUMN=PATH:KEY[:VALUES], got {spec:?}")
+        })?;
+        let (column, name) = column_of(col)?;
+        let mut parts = rest.splitn(3, ':');
+        let path = parts.next().unwrap_or_default();
+        let key = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("--lookup needs a KEY column: {spec:?}"))?;
+        let values: Vec<String> = parts
+            .next()
+            .map(|v| v.split(',').map(str::to_string).collect())
+            .unwrap_or_default();
+        let table = LookupTable::load(Path::new(path), key, &values)
+            .with_context(|| format!("loading {path}"))?;
+        if table.duplicates() > 0 {
+            eprintln!(
+                "note: {path}: {} duplicate key(s); the last occurrence is used",
+                table.duplicates()
+            );
+        }
+        rules.push(EnrichRule {
+            column,
+            name,
+            provider: Provider::Lookup(Arc::new(table)),
+        });
+    }
+    Ok(Some(Enrichment::new(dialect, rules)))
+}
+
+/// Header names followed by the derived column names, for resolving `-c`.
+fn all_column_names<'a>(
+    header: Option<&[Cow<'a, [u8]>]>,
+    enrichment: Option<&Enrichment>,
+) -> Vec<Cow<'a, [u8]>> {
+    let mut names: Vec<Cow<'a, [u8]>> = header.map(|h| h.to_vec()).unwrap_or_default();
+    if let Some(e) = enrichment {
+        names.extend(
+            e.derived_names()
+                .into_iter()
+                .map(|n| Cow::Owned(n.into_bytes())),
+        );
+    }
+    names
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -391,6 +516,7 @@ fn main() {
             index,
             redact,
             hmac_key_file,
+            enrich,
         } => cmd_export(
             &file,
             &dialect,
@@ -409,6 +535,7 @@ fn main() {
                 index_path: index,
                 redact,
                 hmac_key_file,
+                enrich,
             },
             json,
         ),
@@ -429,6 +556,7 @@ fn main() {
             invert,
             threads,
             index,
+            enrich,
         } => cmd_freq(
             &file,
             &dialect,
@@ -441,6 +569,7 @@ fn main() {
                 invert,
                 threads,
                 index_path: index,
+                enrich,
             },
             json,
         ),
@@ -1269,6 +1398,7 @@ struct ExportArgs {
     index_path: Option<PathBuf>,
     redact: Vec<String>,
     hmac_key_file: Option<PathBuf>,
+    enrich: EnrichArgs,
 }
 
 /// Parse `COLUMN=METHOD[:PARAM]` into a rule.
@@ -1408,6 +1538,10 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         (None, None) => (Selection::All, SelectionInfo::All, idx.stats.records),
     };
 
+    let enrichment = build_enrichment(&o.enrich, idx.params.dialect, header.as_deref())?;
+    if let Some(e) = &enrichment {
+        operations.push(Operation::Enrich { rules: e.info() });
+    }
     let redactor = if o.redact.is_empty() {
         None
     } else {
@@ -1435,6 +1569,7 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         hash: HashSelection::SHA256,
         overwrite: o.force,
         redactor: redactor.as_ref(),
+        enrichment: enrichment.as_ref(),
         ..ExportOptions::default()
     };
     let pb = progress_bar(expected, json);
@@ -1462,10 +1597,11 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             format: "csv".into(),
-            content: if redactor.is_some() {
-                "records-redacted"
-            } else {
-                "raw-records"
+            content: match (redactor.is_some(), enrichment.is_some()) {
+                (false, false) => "raw-records",
+                (true, false) => "records-redacted",
+                (false, true) => "records-enriched",
+                (true, true) => "records-redacted-enriched",
             }
             .into(),
             header: !o.omit_header && idx.header.is_some(),
@@ -1587,6 +1723,29 @@ fn cmd_verify(
         );
         for op in &m.operations {
             match op {
+                Operation::Enrich { rules } => {
+                    for r in rules {
+                        let ds = r.dataset.as_ref().map_or(String::new(), |d| {
+                            format!(
+                                " from {}{}{}",
+                                d.name,
+                                d.database_type
+                                    .as_ref()
+                                    .map_or(String::new(), |t| format!(" ({t})")),
+                                d.sha256
+                                    .as_ref()
+                                    .map_or(String::new(), |s| format!(" sha256 {}…", &s[..16]))
+                            )
+                        });
+                        println!(
+                            "            enrich {} (column {}) via {}{ds} → {}",
+                            r.name,
+                            r.column,
+                            r.provider,
+                            r.derived.join(", ")
+                        );
+                    }
+                }
                 Operation::Redact { policy } => {
                     for r in &policy.rules {
                         let how = match &r.method {
@@ -1727,6 +1886,7 @@ struct FreqArgs {
     invert: bool,
     threads: usize,
     index_path: Option<PathBuf>,
+    enrich: EnrichArgs,
 }
 
 /// Run a whole-record search and return its match set (for `--search` on
@@ -1783,12 +1943,13 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
         );
     }
     let header = header_fields(&src, &idx);
-    let column = resolve_columns(std::slice::from_ref(&o.column), header.as_deref())?
+    let enrichment = build_enrichment(&o.enrich, idx.params.dialect, header.as_deref())?;
+    let names = all_column_names(header.as_deref(), enrichment.as_ref());
+    let column = resolve_columns(std::slice::from_ref(&o.column), Some(&names))?
         .and_then(|c| c.first().copied())
         .expect("one column");
-    let column_name = header
-        .as_ref()
-        .and_then(|h| h.get(column))
+    let column_name = names
+        .get(column)
         .map(|f| field_str(f).into_owned())
         .unwrap_or_else(|| format!("col{column}"));
 
@@ -1822,6 +1983,7 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
         column,
         top: o.top,
         threads: o.threads,
+        enrichment: enrichment.as_ref(),
         ..FrequencyOptions::default()
     };
     let pb = progress_bar(src.len(), json);

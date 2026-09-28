@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::dialect::Dialect;
+use crate::enrich::EnrichRuleInfo;
 use crate::hash::{Digests, hex};
 use crate::redact::RedactionPolicy;
 use crate::search::SearchQuery;
@@ -118,6 +119,8 @@ pub enum Operation {
     Search { query: SearchQuery, matches: u64 },
     /// Column redaction applied to the output (no secrets recorded).
     Redact { policy: RedactionPolicy },
+    /// Derived columns appended from local datasets (identified by hash).
+    Enrich { rules: Vec<EnrichRuleInfo> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

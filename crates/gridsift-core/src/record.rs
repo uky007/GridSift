@@ -33,6 +33,27 @@ pub fn split_fields<'a>(
     }
 }
 
+/// Write a field value with the minimal quoting the dialect needs (quote
+/// when it contains the delimiter, the quote byte, CR or LF; double quotes).
+pub fn write_field(value: &[u8], delimiter: u8, quote: Option<u8>, out: &mut Vec<u8>) {
+    let needs_quote = value
+        .iter()
+        .any(|&b| b == delimiter || Some(b) == quote || b == b'\n' || b == b'\r');
+    match quote {
+        Some(q) if needs_quote => {
+            out.push(q);
+            for &b in value {
+                if b == q {
+                    out.push(q);
+                }
+                out.push(b);
+            }
+            out.push(q);
+        }
+        _ => out.extend_from_slice(value),
+    }
+}
+
 /// Raw extent `(start, end)` of every field, quotes included, so a record
 /// can be rewritten field by field while untouched fields keep their exact
 /// bytes.

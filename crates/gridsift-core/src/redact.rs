@@ -285,24 +285,8 @@ fn unquote(raw: &[u8], quote: Option<u8>, out: &mut Vec<u8>) {
     }
 }
 
-/// Write a field value with the minimal quoting the dialect needs.
 fn write_field(value: &[u8], d: Dialect, out: &mut Vec<u8>) {
-    let needs_quote = value
-        .iter()
-        .any(|&b| b == d.delimiter || Some(b) == d.quote || b == b'\n' || b == b'\r');
-    match d.quote {
-        Some(q) if needs_quote => {
-            out.push(q);
-            for &b in value {
-                if b == q {
-                    out.push(q);
-                }
-                out.push(b);
-            }
-            out.push(q);
-        }
-        _ => out.extend_from_slice(value),
-    }
+    crate::record::write_field(value, d.delimiter, d.quote, out);
 }
 
 #[cfg(test)]

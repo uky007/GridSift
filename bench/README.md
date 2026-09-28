@@ -135,6 +135,18 @@ fallback: ten workers each keep at most 131,072 exact entries before going
 lossy, so RSS stays in the low hundreds of MiB however many distinct values
 the column has.
 
+### Enrichment (1 GiB, warm cache, 10 threads)
+
+| Operation | Time |
+|---|---:|
+| `freq -c host.registrable --domain host` (PSL decomposition of 4.84 M hosts on the fly, 1,943 distinct) | 0.49 s |
+| `export` of 483,485 matches with `--lookup src_ip=assets.csv:ip --domain host --redact user=mask` | 1.23 s |
+| desktop: count of the derived `host.registrable` column | 0.44 s |
+
+GeoIP lookups against a real MMDB were not benchmarked here (no database is
+bundled); the `maxminddb` reader does a lookup in about a microsecond, so
+the cost is dominated by the same scan.
+
 ## Still to do
 
 - Cold-cache runs (`sudo purge`), and a 100 GiB run on external storage.
