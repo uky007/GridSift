@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use memmap2::{Advice, Mmap};
+use memmap2::Mmap;
 
 /// Cheap identity of a source file used to bind sidecars (index, digests,
 /// project state) to the bytes they were computed from. Path-independent.
@@ -127,17 +127,20 @@ impl Source {
         Ok(done)
     }
 
-    /// Hint that the mapping will be scanned front to back.
+    /// Hint that the mapping will be scanned front to back (no-op where
+    /// `madvise` is unavailable).
     pub fn advise_sequential(&self) {
+        #[cfg(unix)]
         if let Some(m) = &self.mmap {
-            let _ = m.advise(Advice::Sequential);
+            let _ = m.advise(memmap2::Advice::Sequential);
         }
     }
 
     /// Hint that the mapping will be accessed at random (viewport use).
     pub fn advise_random(&self) {
+        #[cfg(unix)]
         if let Some(m) = &self.mmap {
-            let _ = m.advise(Advice::Random);
+            let _ = m.advise(memmap2::Advice::Random);
         }
     }
 

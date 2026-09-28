@@ -73,9 +73,9 @@ impl SearchQuery {
             return Err("empty pattern".into());
         }
         let matcher = match (self.kind, self.case_insensitive) {
-            (PatternKind::Literal, false) => {
-                Matcher::Literal(memmem::Finder::new(self.pattern.as_bytes()).into_owned())
-            }
+            (PatternKind::Literal, false) => Matcher::Literal(Box::new(
+                memmem::Finder::new(self.pattern.as_bytes()).into_owned(),
+            )),
             (PatternKind::Literal, true) => Matcher::Regex(
                 regex::bytes::RegexBuilder::new(&regex::escape(&self.pattern))
                     .case_insensitive(true)
@@ -120,7 +120,7 @@ fn has_anchor(pattern: &str) -> bool {
 }
 
 enum Matcher {
-    Literal(memmem::Finder<'static>),
+    Literal(Box<memmem::Finder<'static>>),
     Regex(regex::bytes::Regex),
 }
 
@@ -300,17 +300,18 @@ pub struct SearchOutcome {
     pub error: Option<String>,
 }
 
+/// A byte range of the file starting at a known record boundary.
 #[derive(Clone, Copy, Debug)]
-struct Range {
-    start: u64,
-    record: u64,
-    end: u64,
+pub(crate) struct Range {
+    pub(crate) start: u64,
+    pub(crate) record: u64,
+    pub(crate) end: u64,
 }
 
 /// Cut the file at checkpoints into ranges of roughly `range_bytes`. The
 /// last range runs to EOF, which also covers whatever the index has not
 /// reached yet.
-fn plan_ranges(index: &SparseIndex, file_len: u64, range_bytes: u64) -> Vec<Range> {
+pub(crate) fn plan_ranges(index: &SparseIndex, file_len: u64, range_bytes: u64) -> Vec<Range> {
     let cps = &index.checkpoints;
     let Some(&first) = cps.first() else {
         return Vec::new();
