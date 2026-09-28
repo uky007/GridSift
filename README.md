@@ -1,198 +1,134 @@
 # gridsift
 
-**An offline, evidence-safe workbench for investigating multi-gigabyte CSV
+[![CI](https://github.com/uky007/GridSift/actions/workflows/ci.yml/badge.svg)](https://github.com/uky007/GridSift/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+
+An offline, evidence-safe workbench for investigating multi-gigabyte CSV
 security data — without loading it into RAM, uploading it anywhere, or
-modifying the source.**
+modifying the source. Written in Rust; command-line tool and desktop
+application for Linux, macOS and Windows.
 
-> Status: pre-alpha. Phase 0 (core engine + CLI) is under construction.
-> Target: Black Hat USA 2027 Arsenal / DEF CON Demo Labs.
+> Status: pre-release, under active development. Interfaces and the
+> manifest format may still change before 1.0.
 
-## What it is
+## Concept
 
-DFIR and threat-hunting teams routinely receive delimited exports — proxy
-logs, EDR telemetry, firewall/netflow, authentication events — that are far
-too large for a spreadsheet and too ad hoc for a SIEM. gridsift opens such
-files *as they are*:
-
-- **Bounded memory.** A 100 GB file is navigated through a sparse,
-  quote-aware record index; resident memory does not grow with file size.
-- **Immediate.** First rows appear before any full scan; indexing and hashing
-  run in the same background pass.
-- **Evidence-safe.** The source is opened read-only and never rewritten.
+- **Evidence-safe** -- The source is opened read-only and never rewritten.
   Its SHA-256 is computed on open; every derived artefact is tied to it.
-- **Strictly offline.** No telemetry, no update checks, no remote resources.
-  Enrichment (GeoIP, domain classification, local lookups) uses only data
-  packs the analyst imports.
-- **Reproducible.** Filters, enrichments and exports are recorded in a
-  provenance manifest so a finding can be regenerated from the same evidence.
+- **Bounded memory** -- A sparse, quote-aware record index (a few KiB per
+  GiB) is all that is kept. A 10 GiB file is navigated with ~10 MiB of RSS.
+- **Strictly offline** -- No telemetry, no update checks, no DNS.
+  Enrichment (GeoIP / ASN, domain classification, lookups) uses only local
+  datasets the analyst imports, each identified by hash.
+- **Reproducible** -- Every filter, time range, enrichment and redaction is
+  recorded in a provenance manifest next to the export; `gridsift verify`
+  checks it later.
 
-## What it is not
+## Interfaces
 
-Not a spreadsheet: no formulas, no cell formatting, no in-place editing of
-evidence. Analyst changes live in a sidecar overlay and become a *new* file
-only on export.
+| Interface | Binary | Description |
+|-----------|--------|-------------|
+| **CLI** | `gridsift` | Index, search, count, timeline, profile, export, verify; `--json` on every command for scripting and batch use. |
+| **Desktop** | `gridsift-desktop` | The interactive investigation: instant rows, search and pivot with a visible selection lineage, timeline and value counts, enrichment, export with redaction. |
 
-## Layout
+## Quick install
 
-```
-crates/gridsift-core     engine: source, dialect sniffing, scanner, sparse index,
-                         viewport reader, digests, synthetic data
-crates/gridsift-cli      `gridsift` command-line tool (info / index / rows /
-                         search / freq / timeline / export / verify / profile /
-                         count / hash / gen)
-crates/gridsift-desktop  `gridsift-desktop`, the egui application: an evidence
-                         sidebar (facts, typed columns with per-column actions,
-                         enrichment rules, export), a command bar whose
-                         selection lineage is shown as breadcrumb chips, the
-                         virtual grid, and an analysis dock (timeline / values /
-                         profile). Rows appear immediately, index + SHA-256
-                         build in the background; see `docs/design/`
-bench/                   benchmark procedure and baseline numbers
-survey/                  background research the design is based on
-```
-
-## Building
-
-Rust 1.85+ (edition 2024).
+Rust 1.85 or newer. Not on crates.io yet — build from source:
 
 ```
+git clone https://github.com/uky007/GridSift.git
+cd GridSift
 cargo build --release
 ./target/release/gridsift --help
+./target/release/gridsift-desktop
 ```
 
-Quick check on a synthetic 1 GB file:
+See [docs/installation.md](docs/installation.md) for Linux build
+dependencies, the `dist` profile and where the index cache lives.
+
+## Quick usage
 
 ```
-gridsift gen  --profile narrow --size 1G -o /tmp/narrow-1g.csv
-gridsift info /tmp/narrow-1g.csv            # dialect + first rows, no scan
-gridsift index /tmp/narrow-1g.csv           # sparse index + SHA-256, one pass
-gridsift rows  /tmp/narrow-1g.csv --start 3000000 --count 5
-gridsift search /tmp/narrow-1g.csv '/c2/beacon' -c host -n 5     # literal, one column
-gridsift search /tmp/narrow-1g.csv -r 'deny,"curl/[0-9.]+"'      # regex, all cores
-gridsift export /tmp/narrow-1g.csv -o beacon.csv -s '/c2/beacon' -c path
-gridsift verify beacon.csv                  # re-hashes output and source against the manifest
-gridsift profile /tmp/narrow-1g.csv         # what each column holds: ipv4, domain, sha256, …
-gridsift freq /tmp/narrow-1g.csv -c host -n 20               # top hosts over all records
-gridsift freq /tmp/narrow-1g.csv -c dst_port -s ',deny,'     # …over the records matching a search
-gridsift-desktop /tmp/narrow-1g.csv         # or drag & drop onto the window
-gridsift-desktop /tmp/narrow-1g.csv --search '/c2/beacon' --timeline
+gridsift gen  --profile narrow --size 1G -o proxy.csv   # synthetic proxy log, seed 1
+gridsift info proxy.csv                                  # dialect + first rows, no scan
+gridsift index proxy.csv                                 # sparse index + SHA-256, one pass
+gridsift search proxy.csv '/c2/beacon' -c path -n 5      # literal, one column, all cores
+gridsift search proxy.csv -r 'deny,"curl/[0-9.]+"'       # regex
+gridsift freq proxy.csv -c dst_port -s '/c2/beacon'      # top values over the matches
+gridsift timeline proxy.csv -c timestamp -b 1h           # records per hour
+gridsift profile proxy.csv                               # ipv4, domain, sha256, timestamp, …
+gridsift export proxy.csv -o beacon.csv -s '/c2/beacon' -c path \
+    --redact user=hmac --redact user_agent=drop --domain host --hmac-key-file key.txt
+gridsift verify beacon.csv                               # re-hash output and source against the manifest
 ```
 
-In the desktop app the investigation is a chain of selection steps — a
-search, a click on a value, a time range dragged on the timeline — each
-shown as a chip with its match count. Clicking a chip reverts to that step
-without rescanning; the chain is exactly what the export manifest records.
-
-`export` writes the selected records as their exact source bytes (quoting
-preserved, terminators normalised) to a new file, atomically, and puts a
-provenance manifest next to it — `beacon.csv.manifest.json` — recording the
-source identity (size, mtime, SHA-256), the parser settings, the query that
-produced the selection, and the output's own SHA-256. It refuses to write
-onto the source. `verify` recomputes both digests.
-
-### Redaction
-
-Columns can be redacted on the way out, per column:
-
 ```
-gridsift export proxy.csv -o shareable.csv -s '/c2/beacon' \
-    --redact user=hmac --redact src_ip=ip:16 --redact user_agent=drop \
-    --redact email=mask --redact sha256=partial:8 --hmac-key-file key.txt
+gridsift-desktop proxy.csv                               # or drag & drop onto the window
+gridsift-desktop proxy.csv --search '/c2/beacon' --timeline
 ```
 
-| method | effect |
-|---|---|
-| `drop` | the column disappears (header too) |
-| `mask[:TEXT]` | every non-empty value becomes `TEXT` (default `[REDACTED]`) |
-| `partial[:N]` | first `N` characters kept, the rest `*` |
-| `ip[:BITS]` | host bits zeroed: `10.1.243.150` → `10.1.0.0` for 16; non-IPs are masked |
-| `hmac[:LEN]` | deterministic pseudonym: `LEN` hex chars of HMAC-SHA256(key, value) |
+See [docs/usage.md](docs/usage.md) for every option, `jq` recipes and the
+desktop walkthrough.
 
-Untouched columns keep their exact bytes. The manifest records the policy
-(columns, methods, parameters) and, for `hmac`, a fingerprint of the key —
-never the key itself — so a later export can be checked for having used the
-same key. HMAC pseudonyms preserve correlation across rows and files, which
-is the point; they are not an anonymity guarantee against anyone who can
-enumerate candidate values. The desktop app has the same options in its
-Export dialog (per column, next to the column's detected type), and a
-column's menu offers *Redact on export…* directly.
+## Key features
 
-The desktop app and the CLI share the index sidecar (stored under the user
-cache directory, never next to the evidence), so a file indexed by one opens
-instantly in the other.
+- **Instant open** -- rows on screen in milliseconds; the index and the
+  SHA-256 are built in one background pass (~1 s per GiB warm).
+- **Quote-aware sparse index** -- checkpoints carry parser state, so
+  multi-line quoted fields are records, any record is one bounded read
+  away, and scans run on all cores over disjoint ranges.
+- **Search** -- literal and regex, per column, case-insensitive, inverted;
+  2–13 GiB/s on a laptop; results are a compressed bitmap of records.
+- **Selection lineage** -- a search within a search within a time range:
+  each step is a chip with its count, revertable without rescanning, and
+  exactly what the manifest records.
+- **Value counts and timeline** -- top-N per column (exact, then lossy with
+  a stated bound), records per time bucket with drag-to-select ranges.
+- **Semantic typing** -- columns labelled ipv4, domain, sha256, timestamp,
+  port, … with confidence; annotations only, values are never converted.
+- **Offline enrichment** -- GeoIP / ASN from an imported MMDB, registrable
+  domain from the bundled Public Suffix List, joins against local CSVs;
+  derived columns in the grid, in counts and in exports.
+- **Export with redaction** -- exact source bytes per record, or drop /
+  mask / partial / ip-prefix / HMAC-pseudonymised columns; the policy (never
+  the key) goes into the manifest.
+- **Provenance manifest** -- source identity, parser settings, every
+  operation, output digest ([docs/manifest.md](docs/manifest.md)).
+- **Honest numbers** -- elapsed time, throughput and peak RSS on every
+  command; approximate results say so.
 
-## Offline enrichment
+## Screenshots
 
-Derived columns come from local data only — the tool never resolves, fetches
-or phones home:
+### Desktop: search, lineage, timeline
 
-```
-gridsift freq   proxy.csv -c src_ip.country --geoip src_ip=GeoLite2-Country.mmdb
-gridsift freq   proxy.csv -c host.registrable --domain host
-gridsift export proxy.csv -o out.csv -s beacon \
-    --geoip dst_ip=GeoLite2-ASN.mmdb --domain host --lookup src_ip=assets.csv:ip:owner,site
-```
+![gridsift desktop](images/gridsift-desktop.png)
 
-| provider | derived columns | data |
-|---|---|---|
-| `--geoip COL=FILE.mmdb` | `COL.country`, `COL.city` (city DB) or `COL.asn`, `COL.as_org` (ASN DB) | an MMDB file you import (GeoLite2, DB-IP Lite, …); nothing is bundled because their licences differ |
-| `--domain COL` | `COL.registrable`, `COL.suffix`, `COL.subdomain` | the Public Suffix List snapshot compiled into the `psl` crate |
-| `--lookup COL=FILE.csv:KEY[:V1,V2]` | one column per value column | any local CSV: asset inventory, IOC list, resolver-cache export, analyst mapping |
+### Value counts within the selection
 
-The manifest records every dataset by name, size, SHA-256 and (for MMDB)
-`database_type` and build time, so `dst_ip.country = JP` is a reproducible
-statement about a specific database, not an unexplained value. Derived
-columns can be counted (`freq`), exported and, in the desktop app, shown in
-the grid; redaction of a source column does not affect the values derived
-from it (enrichment sees the original bytes). Reverse DNS is deliberately
-absent: without local DNS data there is no offline way to learn a PTR, and a
-resolver query would be network activity.
+![gridsift values](images/gridsift-values.png)
 
-## Timeline
+### Export finding: lineage, redaction, manifest
 
-```
-gridsift timeline proxy.csv -c timestamp                 # auto bucket width
-gridsift timeline proxy.csv -c timestamp -b 1h -s deny   # hourly, over the records matching "deny"
-```
+![gridsift export](images/gridsift-export.png)
 
-`timeline` parses a timestamp column (ISO 8601 / RFC 3339, `YYYY/MM/DD`,
-Apache CLF, syslog, US-style, Unix epoch in s/ms/µs; naive times are taken
-as UTC) and counts records per bucket on all cores. Workers count at
-one-second resolution and coarsen to minutes, hours or days when a file
-spans too much time for the memory cap, so memory stays bounded whatever
-the range. In the desktop app the chart is interactive: drag a range and
-**Filter to range** turns it into a selection (nested inside the current
-one), recorded in the manifest as a `time_range` operation.
+## Exit codes
 
-## Value counts
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Error (input not found or unreadable, invalid arguments) — for `verify`, a digest mismatch |
 
-`freq` (and the desktop *Values* tab, from a column's *Count values*) counts
-the values of one column over all records or over the current selection, on
-all cores. Counting
-is exact up to 131,072 distinct values per worker; beyond that it switches
-to lossy counting so memory stays bounded on high-cardinality columns
-(hashes, unique IDs), and the result then says so and gives an error bound.
-Distinct values are counted exactly when possible and estimated with
-HyperLogLog otherwise. In the desktop app, clicking a value filters the grid
-by it — the pivot step of an investigation.
+## Docs
 
-## Semantic typing
-
-`profile` (and the desktop sidebar, grid header and *Profile* tab) labels each column with what it
-appears to hold — `timestamp`, `ipv4`, `ipv6`, `ip:port`, `mac`, `domain`,
-`url`, `email`, `md5`/`sha1`/`sha256`, `uuid`, `port`, `http_status`,
-`integer`, `float`, `boolean`, `categorical`, `text` — from a sample drawn
-from the head of the file and from positions spread across it. The label
-comes with its evidence (share of sampled values, distinct count, examples)
-and is an annotation only: values are never converted.
-
-## Correctness model
-
-Record boundaries are found by a quote-aware scanner that follows the
-`csv` crate's lenient rules (quoted fields may contain delimiters, quotes as
-`""`, and newlines; `\n`, `\r`, `\r\n` all terminate records; empty lines are
-skipped). The scanner and field splitter are checked against the `csv` crate
-on a torture corpus and on randomly generated input (`cargo test`).
+- [Description & feature list](docs/description.md)
+- [Installation](docs/installation.md)
+- [Usage & examples](docs/usage.md)
+- [The provenance manifest](docs/manifest.md)
+- [Survey of existing tools](docs/survey.md)
+- [Roadmap](docs/roadmap.md)
+- [Desktop UI design](docs/design/README.md)
+- [Benchmarks](bench/README.md)
 
 ## License
 
@@ -201,4 +137,4 @@ Dual-licensed under either of
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
-at your option.
+at your option. Third-party licences are listed in [NOTICE](NOTICE).

@@ -1,11 +1,12 @@
 [package]
 name = "gridsift-desktop"
-description = "gridsift desktop application (egui)"
+description = "Offline, evidence-safe desktop workbench for very large CSV security data (egui)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 

@@ -2,4 +2,8 @@
 .DS_Store
 # generated benchmark datasets and sidecars never belong in the repo
 /bench/data/
-*.gridsift-index
+*.gsix
+# raw research material and local notes stay out of the public tree
+/survey/
+/notes/
+.claude/

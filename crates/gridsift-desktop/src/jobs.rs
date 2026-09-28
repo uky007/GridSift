@@ -293,10 +293,11 @@ impl SelectionNode {
                 human_bytes(self.rate() as u64)
             ),
             Some(o) if o.complete => format!(
-                "{n} matches in {:.2} s ({}/s, {} threads)",
+                "{n} matches in {:.2} s ({}/s, {} thread{})",
                 o.elapsed.as_secs_f64(),
                 human_bytes((o.bytes_scanned as f64 / o.elapsed.as_secs_f64().max(1e-3)) as u64),
-                o.threads
+                o.threads,
+                if o.threads == 1 { "" } else { "s" }
             ),
             Some(o) => match &o.error {
                 Some(e) => format!("{n} matches · read error: {e}"),
