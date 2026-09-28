@@ -1,112 +1,216 @@
 # Survey of existing tools
 
-> Status note (September 2026): the entries below are based on project
-> READMEs, release notes and official product pages as of late September
-> 2026. Size and speed figures are the projects' own claims, measured on
-> different hardware and data; they are not comparable with each other or
-> with gridsift's numbers, and "active" is an approximate maintenance
-> signal, not a quality judgement.
+> **Status note (checked 2026-09-28).** Every entry below was checked
+> against the project's own README, documentation or product page on that
+> date; the page used is listed in [References](#references). Size and
+> speed figures are the projects' own claims, measured on their hardware
+> and data — they are not comparable with each other or with gridsift's
+> numbers. "Not documented" means the reviewed pages do not say; it does
+> not prove absence. Prices and editions change; treat them as
+> indicative.
 
-## Why gridsift?
+## Scope and method
 
-Opening a multi-gigabyte CSV is no longer novel: several viewers and editors
-do it, some far beyond 100 GB. What the survey did not find is a tool that
-combines, in one open-source cross-platform application, the four things a
-forensic investigation of a large delimited export needs:
+The question was: *what does a DFIR analyst, threat hunter or forensic
+examiner use today to look at a multi-gigabyte CSV/TSV export on a
+workstation — often offline — and what does each option cost them in
+size, interactivity, evidence handling and network exposure?* (The case
+for the tool is in [motivation.md](motivation.md).)
 
-1. **bounded-memory, quote-aware navigation** of files larger than RAM;
-2. **an interactive investigation flow** — search, pivot, time window,
-   value counts — rather than a viewer or a batch CLI;
-3. **strict offline operation with local enrichment** (GeoIP / ASN, domain
-   classification, local lookups) identified by dataset hash;
-4. **evidence handling by construction** — read-only source, digest on open,
-   a provenance manifest for every export.
+Four families were reviewed:
 
-Each existing tool covers one or two of these. gridsift's position is the
-intersection.
+1. **DFIR-native tools** that produce or consume large CSV timelines.
+2. **Large-file viewers and editors** — the applications that open files
+   spreadsheets cannot.
+3. **Command-line CSV tools and engines.**
+4. **Ingest-and-index platforms** (SIEM / search stacks) as the
+   "load it somewhere" alternative.
 
-## Desktop viewers and editors
+For each tool the reviewed pages were read for: licence and platforms; the
+documented approach to large input (in memory, streamed, indexed, copied
+into a store); whether quoted multi-line fields are handled as records;
+offline / no-network statements; and any provenance features (source
+hashes, operation logs, export manifests).
 
-| Tool | License | Platforms | Large-file approach (project claims) | Positioning |
+## 1. DFIR-native tools
+
+| Tool | Licence · platforms | Large input | Offline · provenance | Position |
 |---|---|---|---|---|
-| **EmEditor** | proprietary (Free / Professional) | Windows | up to 16 TB / ~1.1 trillion lines; partial loading, multithreading, SIMD; vendor benchmarks open 10–50 GB files in seconds | the performance reference for huge text and CSV editing; Windows-only, not OSS |
-| **Modern CSV v3** | proprietary (Free / Premium) | Win / macOS / Linux | 100M+ rows, "stream editing mode" for low-memory systems | full CSV editor with SQL-style filtering and built-in charts; the strongest commercial competitor for "big CSV + charts" |
-| **Cassava** | commercial (beta) | macOS / Linux | millions of rows | editor with multi-file SQL, statistics, charts and pivots |
-| **CsvTitan** | proprietary, local-first | Win / macOS / Linux | 10 GB+, larger than RAM; Rust | read / filter / SQL / regex / export; not DFIR-oriented |
-| **CSView** | proprietary | macOS | 300M-row example; read-only | safe read-only viewing of giant CSVs — the "read-only huge viewer" niche is occupied |
-| **Colomin** | AGPL-3.0 + commercial terms | Win / macOS / Linux | 10M+ rows; background indexing streams the file into view; Rust | a focused, fully offline CSV editor |
-| **CEESVEE** | MIT | Win / macOS / Linux | multi-GB in bounded-memory read-only mode via a streaming record index; Tauri v2 + Rust core, React frontend receives only visible windows | local-first (no account, no cloud, no telemetry); charts and scripting are explicit v1 non-goals |
-| **Tablecruncher** | GPL-3.0-or-later | Win / macOS / Linux | 2 GB / 16M rows opened in 32 s on an M2 Mac mini; C++17 + FLTK | lightweight native editor with JavaScript macros |
-| **Columnar** | BSD-3-Clause | Win / macOS / Linux | tested to 14 GB / 28M rows; full per-row offset index (~8 B/row, ~225 MB, 20–30 s), mmap + Rayon | read-only viewer with statistics, search and sort |
-| **Dinosaur** | MIT | Windows builds | tested to 170 GB; mmap + memchr + Rayon sparse *line* index, checkpoint every 4,096 lines; Rust / egui | read-only grid, search, go-to-row; line-oriented, so quoted multi-line fields are not records |
-| **LeanRows** | MIT | Windows | 1.5 GB / 20M rows at 18.4 MB peak working set; quote-aware record boundaries across read blocks; no network by design | deliberately minimal read-only viewer; the closest precedent for the evidence-safe viewer part of gridsift |
-| **Duckling** | MIT | Win / macOS / Linux | DuckDB + Arrow transport; Tauri 2 + React | SQL editor, pivots, column profiling for CSV / Parquet / JSON and databases |
-| **Tad** | MIT | Win / macOS / Linux (Electron) | in-memory DuckDB; designed for millions of rows | hierarchical pivots and SQL-generated analysis |
-| **OpenRefine** | BSD-style | local browser UI | server / client wrangling architecture; not a constant-memory raw-file viewer | strong transformations with a reproducible operation history — conceptually close to gridsift's manifest, far from its file engine |
-| **LibreOffice Calc / Excel** | MPL-2.0 / proprietary | desktop | 1,048,576 rows (16M with LibreOffice's very-large-spreadsheet mode) | the baseline analysts fall back to; not applicable at the sizes above |
+| **Timeline Explorer** (Eric Zimmerman) | free download, source not public; Windows (.NET 9) | filtering, searching, sorting, grouping; no memory model or size guidance documented | local desktop app; no provenance features documented | the de-facto viewer for KAPE / EZ-tool and Hayabusa CSV output; Windows-only |
+| **Timesketch** | Apache-2.0; Docker on Ubuntu, ≥ 8 GB RAM | CSV/JSONL imported into OpenSearch (importer splits large files); "hundreds of millions of events" with a multi-node cluster | can run on an isolated host, but it is a server stack (web, worker, PostgreSQL, OpenSearch, Redis); no source hashing documented | collaborative timeline platform; the data is copied into an index |
+| **Plaso** (log2timeline / psort) | Apache-2.0; macOS, Linux, Windows | *produces* timelines: `.plaso` storage, then `psort` to CSV (`l2tcsv`, `dynamic`), JSON, XLSX, OpenSearch | `pinfo` records command line, tool version, parsers; optional `--hashers` stores hashes of processed files | upstream of gridsift: it makes the multi-GB CSVs that then need a viewer |
+| **Velociraptor** | AGPL-3.0; Windows, Linux, macOS | VQL `parse_csv` streams rows; notebooks with VQL cells; "Instant Velociraptor" runs server + client on loopback in a browser | offline collector produces encrypted zips; local mode still needs a browser and a datastore | a full endpoint-collection platform; CSV analysis is scripted VQL, not a bounded-memory grid |
+| **Zui** (formerly Brim) | licence not stated in the repository; Windows, macOS, Linux (Electron) | data is loaded into a local Zed/SuperDB lake; inputs include pcap (via Brimcap), Zeek logs, JSON, Parquet, CSV | no provenance documented; latest release Sept 2024 | pcap / Zeek-centric; CSV is an ingest format, and the app works on the copy |
+| **Hayabusa, Chainsaw, Takajo** | AGPL-3.0 / GPL-3.0 / AGPL-3.0 | EVTX analysers that *emit* CSV / JSONL timelines; Hayabusa's README recommends "LibreOffice, Timeline Explorer, Elastic Stack, Timesketch and more" as viewers | — | producers, not viewers; their output is a gridsift input |
 
-## Command-line and terminal tools
+What this family shows: the DFIR ecosystem has excellent *producers* of
+large CSV timelines and one widely used *viewer* — free, Windows-only,
+with nothing documented about scale or provenance. Everything larger goes
+into a server-side index.
 
-| Tool | License | Notes |
-|---|---|---|
-| **qsv** | MIT / Unlicense | the most capable CSV CLI suite: index-backed and streaming commands, regex, validation, statistics, offline GeoNames / MaxMind geocoding, visualisation output; a project-reported 15 GB / 28M-row count in ~12 s without an index. Batch-oriented; no interactive investigation view |
-| **xan** | MIT | successor-in-spirit to xsv: fast, low-memory, parallel analysis CLI with an expression language |
-| **xsv** | MIT / Unlicense | the original Rust CSV index / query CLI; archived, its README points to qsv and xan |
-| **Miller (`mlr`)** | BSD-2-Clause | record-streaming transformations over CSV / TSV / JSON; the reference for constant-memory pipeline semantics |
-| **csvkit** | MIT | Python CSV toolkit; its own documentation recommends SQL or qsv / xsv beyond moderate sizes |
-| **q** | GPL-3.0 | SQL over CSV via SQLite; a 4.8 GB file takes minutes on first parse and seconds from its disk cache — the case for incremental caching |
-| **VisiData** | GPL-3.0 | terminal spreadsheet with search, pivots, frequency tables; rows are held as Python objects, so single sheets of many millions of rows are memory-bound |
-| **csvlens** | MIT | "less for CSV": navigation, search, filter and sort in the terminal; also an embeddable Rust library |
-| **lazycsv** | OSS | memory-mapped lazy access, cell editing, DuckDB-backed SQL in a TUI |
+## 2. Large-file viewers and editors
 
-## Engines and libraries
+| Tool | Licence · platforms | Large input (project's own claim) | Offline · provenance | Position |
+|---|---|---|---|---|
+| **EmEditor** | proprietary; Free (personal use only, no CSV tools) / Professional subscription; Windows | "up to 16 TB or 1,099 billion lines" using temporary files; vendor benchmark: open a 10 GB file in 1.067 s, sort it in 7.271 s | "privacy-first" listed without detail; no hashing | the performance reference for huge text and CSV editing |
+| **Modern CSV** (v3 beta) | proprietary freemium; Windows, macOS, Linux | v3 beta: "more than 100 million rows", "Stream Editing Mode for ultra-large files on low-memory systems"; read-only mode with "a small memory footprint" | "Your data remains local. It's never sent to the cloud"; no hashing | editor with charts and Python plugins (beta build expires 2026-12-31) |
+| **CEESVEE** | MIT; Windows, macOS, Linux (Tauri v2, Rust core, React UI) | "Multi-GB files open read-only against a streaming record index … with bounded memory"; 1M rows / 100 MB+ is "a core requirement" | "no telemetry, no analytics, and no network calls"; exports can write "a JSON manifest recording row counts and SHA-256 hashes" | the closest OSS editor in spirit; charts and scripting are v1 non-goals |
+| **LeanRows** | MIT; Windows x64 | "20,000,001 rows, 1,532,454,643 bytes, fully indexed. Peak working set: 18.4 MB"; record boundaries "quote-aware across read blocks, including quoted fields containing newlines" | "no telemetry and no network access of any kind" | read-only viewer; the closest precedent for the evidence-safe viewer part of gridsift |
+| **Columnar** | BSD-3-Clause; Windows, macOS, Linux (Tauri v2) | "tested up to 28 million rows and 14 GB"; byte offset of every row (~225 MB index for 28M rows, 20–30 s to build); memory ≈ rows × 8 B | not documented | read-only viewer with statistics, search, sort |
+| **Colomin** | AGPL-3.0-or-later + commercial terms; macOS, Linux, Windows (Rust / egui) | "10M+ rows"; "Background indexing streams huge files into view" | "No cloud, no subscription … Your data stays on your machine" | a focused CSV *editor* |
+| **Tablecruncher** | GPL-3.0-or-later; macOS, Windows, Linux (C++17 / FLTK) | "a 2 GB file with 16 million rows … in just 32 seconds" on a Mac mini M2 | not documented | lightweight editor with JavaScript macros |
+| **CsvTitan** | proprietary; Windows, macOS, Linux (Rust) | "Open 10GB+ CSVs instantly without loading bars or memory crashes" | "A strictly local CSV viewer. No data egress, no cloud uploads" | viewer with filter / query / export |
+| **CSView 2** (and CSView 1.x) | 2: proprietary, macOS; 1.x: Apache-2.0, macOS / Windows / Linux | 2: "A 27 GB synthetic dataset with over 300M rows" scrollable "within seconds"; 1.x: "files larger than 4GB" | "No subscriptions, no cloud, no telemetry"; "never modifies your source data" | read-only viewer |
+| **LogViewPlus** | commercial; Windows (.NET Framework 4.8) | "constrained only by the amount of system memory"; "500 MB log file in about 30 seconds"; chunking for larger files | not documented | in-memory log viewer with a DSV parser (quoted multi-line fields) |
+| **klogg** / glogg | GPL-3.0(+); Windows, macOS, Linux (Qt) | "reads the file directly from disk, without loading it into memory"; "10+ Gb is not a problem"; > 2^31 lines | not documented | line-oriented regex log viewer; no columns, types or time buckets |
+| **lnav** | BSD-2-Clause; Linux, macOS, Windows | "No server. No setup"; CSV/TSV via a `tabular` format declaration; SQLite queries | not documented | terminal log navigator |
+| **Tad** | MIT; macOS, Linux, Windows (Electron) | CSV imported into an in-memory DuckDB instance; "supports large files" without figures | not documented | pivot-table viewer; author describes it as a hobby project |
+| **Duckling** | MIT; Windows, macOS, Linux (Tauri 2) | DuckDB + Arrow transport; no size claim | not documented | viewer for CSV / Parquet and databases |
+| **Thoth** | MIT; macOS, Windows, Linux (Rust / egui) | "gigabyte-sized" JSON / NDJSON, parsed lazily; CSV via a bundled plugin | plugins are sandboxed WebAssembly components (Wasmtime) | JSON-centric data workspace; interesting plugin model |
+| **lazycsv** | MIT; macOS, Linux, Windows (Rust TUI) | "Open a 10GB file instantly", memory-mapped; DuckDB-backed queries including UPDATE / DELETE; cell editing | not documented | terminal editor |
+| **Cassava** | commercial, release candidate; macOS, Linux | "millions of rows"; multi-file SQL, charts, pivots | not documented | editor |
+| **OpenRefine** | BSD-3-Clause; Windows, macOS, Linux (local web app) | "large" defined as > 1M cells or > 50 MB; default 1 GB heap | "does not require internet access"; "Infinite undo/redo … replay your operation history on a new version" | data cleaning; the operation-history idea is the closest cousin of gridsift's manifest |
+| **Excel / LibreOffice Calc** | proprietary / MPL-2.0 | 1,048,576 rows × 16,384 columns per sheet | — | the baseline analysts fall back to |
 
-| Component | License | Relevance |
-|---|---|---|
-| **DuckDB** | MIT | out-of-core grouping, joining, sorting and window functions with disk spilling; the candidate engine for SQL over a selection in a later gridsift version |
-| **Apache Arrow / Parquet** | Apache-2.0 | columnar in-memory and on-disk formats; a possible derived cache, with the source CSV remaining the authoritative evidence |
-| **Rust `csv` crate** | Unlicense / MIT | the reference parser gridsift's scanner is checked against on torture and random input |
-| **MaxMind DB format / `maxminddb` crate** | ISC (crate) | GeoLite2 / DB-IP Lite readers; databases are imported by the user, never bundled |
-| **Public Suffix List / `psl` crate** | MPL-2.0 (list), MIT / Apache-2.0 (crate) | registrable-domain classification without any network access |
-| **egui / eframe** | MIT / Apache-2.0 | immediate-mode GUI in pure Rust; a single-language, statically linked desktop binary |
+What this family shows: bounded-memory viewing of huge files exists —
+line-oriented (klogg, EmEditor) or CSV-aware (LeanRows, CEESVEE, Columnar,
+CSView) — and several products now state "no cloud / no telemetry".
+Provenance is almost absent: CEESVEE's export manifest (row counts and
+SHA-256 of outputs) is the only such feature found among viewers and
+editors, and no viewer documents hashing the *source* on open. None
+combines search, value counts and a time histogram over a recorded
+selection.
+
+## 3. Command-line tools and engines
+
+| Tool | Licence · platforms | Large input | Offline · provenance | Position |
+|---|---|---|---|---|
+| **qsv** | MIT; Linux, macOS, Windows | streaming and index-backed commands; "11.87 seconds for a 15gb, 28m row NYC 311 dataset without an index. Instantaneous with an index" | offline geocoding "against an updatable local copy of the Geonames cities & the Maxmind GeoLite2 databases"; "Compute or check BLAKE3 hashes of files"; `fetch` and `--update` do use the network | the most capable CSV CLI suite; the reference for what a CSV tool should be able to do |
+| **xan** | Unlicense OR MIT; macOS, Linux, Windows | "large CSV files (gigabytes to terabytes)" | not documented | analysis CLI with an expression language; rewritten fork of xsv |
+| **xsv** | MIT OR Unlicense | born from "a 40GB CSV file"; index for constant-time positioning | — | archived April 2025; README recommends qsv or xan |
+| **Miller** (`mlr`) | BSD-2-Clause; Linux, macOS, Windows | "streaming: most operations need only a single record in memory" | not documented | record-streaming transformations |
+| **csvkit** | MIT; Python | docs: "If you need csvkit to be faster or to handle larger files … Consider loading the data into SQL, or using qsv or xsv" | not documented | conversion utilities |
+| **q** | GPL-3.0; macOS, Linux, Windows | 5M rows × 100 columns (4.8 GB): 4 min 47 s uncached vs 1.92 s with its disk cache | not documented | SQL over CSV via SQLite; the case for building an index once and reusing it |
+| **VisiData** | GPL-3.0; Linux, macOS, Windows (WSL) | loaders stream rows, but a loaded sheet is held in memory | command log (`.vdj`) records and replays a session | terminal exploration; the command log is a reproducibility feature worth noting |
+| **csvlens** | MIT; macOS, Linux, BSDs, Windows | not documented | not documented | "like less but made for CSV" |
+| **DuckDB** (CLI) | MIT; single static binary for Windows, macOS, Linux | `read_csv` sniffs dialect and types, reads in parallel, keeps rejected lines; GROUP BY / JOIN / ORDER BY / window spill to disk, with documented out-of-memory caveats; `-readonly` | engine is offline; the optional UI extension fetches its front end from a remote server; no provenance features | the natural engine for SQL over a selection; not a workbench and not evidence-aware |
+
+## 4. Ingest-and-index platforms
+
+| Platform | What a one-off export costs |
+|---|---|
+| **Splunk Free** | indexes "500 MB per day"; search is blocked after three licence warnings in 30 days; reference production hardware is 12 physical cores / 12 GB RAM / 800 IOPS. A 20 GB export exceeds the daily cap forty times over |
+| **Elastic / Kibana** | Elasticsearch and Kibana servers plus an ingest path (Agent, Beats, Logstash or pipelines); Kibana's file upload is capped at 500 MB by default, 1 GB at most |
+| **Timesketch** | the Docker stack above; CSV needs `message`, `datetime`, `timestamp_desc` columns; OpenSearch keyword fields are capped at 32,766 bytes |
+
+All three copy the evidence into an index, need server processes and
+indexing time, and are the right answer when the infrastructure already
+exists and the data will be revisited by a team. For triage of one export
+on one laptop — the situation in [motivation.md](motivation.md) — they
+are heavy, and the copy they create is not the evidence.
 
 ## Capability matrix
 
-`✓` documented in the reviewed material, `~` partial or adjacent, `—` not
-found in the reviewed documentation (which does not prove absence).
+`✓` documented in the reviewed material · `~` partial or adjacent · `—`
+not found in the reviewed documentation (which does not prove absence).
+The gridsift column is self-reported and describes what is implemented
+today.
 
-| Capability | EmEditor | Modern CSV | CEESVEE | Colomin | qsv | LeanRows | gridsift |
-|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| Files larger than RAM | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cross-platform | — | ✓ | ✓ | ✓ | ✓ | — | ✓ |
-| Open source | — | — | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Interactive GUI | ✓ | ✓ | ✓ | ✓ | — | ✓ | ✓ |
-| Quote-aware records (multi-line fields) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Search / filter / value counts / time buckets in one view | ~ | ~ | ~ | ~ | — | — | ✓ |
-| Nested selection steps shown and recorded | — | — | — | — | — | — | ✓ |
-| Offline GeoIP / ASN | — | — | — | — | ✓ | — | ✓ |
-| Domain classification (PSL) | — | — | — | — | ~ | — | ✓ |
-| Semantic column typing (ip, hash, timestamp, …) | — | — | — | — | ~ | — | ✓ |
-| Read-only evidence mode | ~ | ~ | ✓ | — | — | ✓ | ✓ |
-| Source digest on open | — | — | — | — | ~ | — | ✓ |
-| Provenance manifest for exports, with verification | — | — | — | — | — | — | ✓ |
-| Export-time redaction with recorded policy | — | — | — | — | ~ | — | ✓ |
-| No network by design | — | ~ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| In-place editing | ✓ | ✓ | ✓ | ✓ | — | — | — (by design) |
-| SQL | ~ | ✓ | ~ | — | ~ | — | — (planned) |
+| Capability | Timeline Explorer | EmEditor | Modern CSV | CEESVEE | LeanRows | klogg | qsv | DuckDB CLI | Timesketch | gridsift |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
+| Files larger than RAM | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (server) | ✓ |
+| Quoted multi-line fields are records | ✓ | ~ | ✓ | ~ | ✓ | — | ✓ | ✓ | ~ | ✓ |
+| Interactive GUI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (web) | ✓ |
+| Cross-platform | — | — | ✓ | ✓ | — | ✓ | ✓ | ✓ | ~ | ✓ |
+| Open source | — | — | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Search + value counts + time buckets over the same selection | ~ | ~ | ~ | ~ | — | ~ | ~ | ~ (SQL) | ✓ | ✓ |
+| Selection steps shown and recorded | — | — | — | — | — | — | — | — | — | ✓ |
+| No network by design (documented) | — | — | ~ | ✓ | ✓ | — | ~ | ~ | — | ✓ |
+| Source hashed on open | — | — | — | — | — | — | ~ (command) | — | — | ✓ |
+| Provenance manifest on export, verifiable later | — | — | — | ~ | — | — | — | — | — | ✓ |
+| Offline GeoIP / ASN and domain enrichment | — | — | — | — | — | — | ✓ | — | — | ✓ |
+| Export-time redaction with recorded policy | — | — | — | — | — | — | — | — | — | ✓ |
+| Semantic column typing (ip, hash, timestamp, …) | — | — | — | ~ | — | — | ~ | ~ | — | ✓ |
+| In-place editing | — | ✓ | ✓ | ✓ | — | — | — | — | — | — (by design) |
+| SQL | — | — | — | — | — | — | ~ | ✓ | ~ | — (planned) |
+
+Reading the matrix by column: the tools that keep memory bounded are
+viewers, editors or engines without an evidence model; the tools with a
+reproducibility feature (CEESVEE's export manifest, OpenRefine's operation
+history, VisiData's command log, Plaso's extraction metadata) do not
+combine it with bounded-memory interactive investigation. No reviewed
+tool hashes the source on open and ties every subsequent step to it.
 
 ## What gridsift takes from each
 
-- **LeanRows, Dinosaur, Columnar** — bounded-memory navigation through a
-  byte-offset index. gridsift's index is sparse (like Dinosaur's) but stores
-  parser state at each checkpoint (like LeanRows' quote-aware boundaries),
-  so quoted multi-line fields are records and scans can resume anywhere.
-- **qsv** — the breadth of what a CSV CLI should do, `--json` everywhere,
-  and offline geocoding as a first-class feature.
-- **OpenRefine** — the idea that the operation history *is* the
-  reproducibility story; gridsift makes it a manifest next to every export.
-- **q** — the reminder that re-parsing a large CSV on every question is the
-  wrong default: build the index once, keep it in a sidecar, reuse it.
-- **CEESVEE / Colomin** — that "OSS + cross-platform + offline + large CSV"
-  alone is not a differentiator; the investigation flow and the evidence
-  model are.
+- **LeanRows, Columnar, CSView, klogg** — bounded-memory navigation
+  through a byte-offset index. gridsift's index is sparse (checkpoints
+  rather than every row) and stores parser state at each checkpoint, so
+  quoted multi-line fields are records and a scan can resume anywhere on
+  any core.
+- **CEESVEE** — the export manifest with SHA-256 digests. gridsift starts
+  earlier (the *source* is hashed on open) and records every step between
+  source and output, then verifies both ends.
+- **qsv** — the breadth of a CSV CLI, `--json` on every command, and
+  offline geocoding as a first-class feature.
+- **OpenRefine, VisiData** — that the operation history *is* the
+  reproducibility story; gridsift makes it a manifest next to every export
+  and shows it on screen as the selection lineage.
+- **q** — that re-parsing a large CSV for every question is the wrong
+  default: build the index once, keep it in a sidecar, reuse it.
+- **Plaso, Hayabusa, Chainsaw, Velociraptor** — the producers whose
+  output gridsift is meant to open; their column conventions
+  (`datetime`, `timestamp_desc`, `message`) are the first thing the
+  semantic typer should recognise.
+- **DuckDB** — the engine gridsift intends to embed for SQL over a
+  selection, keeping the source CSV authoritative.
+- **Thoth** — a capability-limited WebAssembly plugin model, if gridsift
+  ever grows extensions.
+
+## References
+
+Pages consulted on 2026-09-28.
+
+**DFIR-native**
+- Timeline Explorer — https://ericzimmerman.github.io/ ; third-party scale note: https://dfirmadness.com/case-001-super-timeline-analysis/
+- Timesketch — https://github.com/google/timesketch ; https://timesketch.org/guides/admin/install/ ; https://timesketch.org/guides/user/import-from-json-csv/ ; https://timesketch.org/guides/admin/scaling-and-limits/
+- Plaso — https://github.com/log2timeline/plaso ; https://plaso.readthedocs.io/en/latest/sources/user/Output-and-formatting.html ; https://plaso.readthedocs.io/en/latest/sources/user/Using-pinfo.html
+- Velociraptor — https://github.com/Velocidex/velociraptor ; https://docs.velociraptor.app/docs/deployment/ ; https://docs.velociraptor.app/vql_reference/parsers/ ; https://docs.velociraptor.app/docs/deployment/offline_collections/
+- Zui — https://github.com/brimdata/zui ; https://zui.brimdata.io/docs/support/Supported-Platforms
+- Hayabusa — https://github.com/Yamato-Security/hayabusa ; Takajo — https://github.com/Yamato-Security/takajo ; Chainsaw — https://github.com/WithSecureLabs/chainsaw
+
+**Viewers and editors**
+- EmEditor — https://www.emeditor.com/ ; https://www.emeditor.com/text-editor-features/emeditor-free/
+- Modern CSV — https://www.moderncsv.com/ ; https://www.moderncsv.com/v3-beta/
+- CEESVEE — https://github.com/soldforaloss/ceesvee ; https://ceesvee.com/
+- LeanRows — https://github.com/abooodbah/leanrows
+- Columnar — https://github.com/chdwql/Columnar
+- Colomin — https://colomin.app/ ; https://github.com/saman/colomin
+- Tablecruncher — https://github.com/Tablecruncher/tablecruncher ; https://tablecruncher.com/
+- CsvTitan — https://csvtitan.com/
+- CSView — https://kothar.net/csview ; https://github.com/csview-app/csview
+- LogViewPlus — https://www.logviewplus.com/large-log-files.html ; https://www.logviewplus.com/docs/dsv_parser.html
+- klogg — https://klogg.filimonov.dev/ ; https://github.com/variar/klogg ; glogg — https://github.com/nickbnf/glogg
+- lnav — https://github.com/tstack/lnav ; https://docs.lnav.org/en/latest/formats.html
+- Tad — https://www.tadviewer.com/ ; https://github.com/antonycourtney/tad
+- Duckling — https://github.com/l1xnan/duckling
+- Thoth — https://github.com/anitnilay20/thoth
+- lazycsv — https://github.com/funkybooboo/lazycsv
+- Cassava — https://cassava.dev/
+- OpenRefine — https://openrefine.org/ ; https://openrefine.org/docs/manual/installing
+- Excel — https://support.microsoft.com/en-us/office/excel-specifications-and-limits-1672b34d-7043-467e-8e27-269d656771c3 ; LibreOffice Calc — https://books.libreoffice.org/en/CG24/CG2401-Introduction.html
+
+**Command-line tools and engines**
+- qsv — https://github.com/dathere/qsv
+- xan — https://github.com/medialab/xan
+- xsv — https://github.com/BurntSushi/xsv
+- Miller — https://github.com/johnkerl/miller
+- csvkit — https://github.com/wireservice/csvkit ; https://csvkit.readthedocs.io/en/latest/
+- q — https://github.com/harelba/q ; https://harelba.github.io/q/
+- VisiData — https://github.com/saulpw/visidata ; https://www.visidata.org/docs/save-restore/ ; https://www.visidata.org/docs/api/loaders
+- csvlens — https://github.com/YS-L/csvlens
+- DuckDB — https://github.com/duckdb/duckdb ; https://duckdb.org/docs/current/data/csv/overview.html ; https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html ; https://duckdb.org/docs/current/core_extensions/ui.html
+
+**Platforms**
+- Splunk Free — https://help.splunk.com/en/splunk-enterprise/administer/admin-manual/10.4/configure-splunk-licenses/about-splunk-free ; reference hardware — https://help.splunk.com/en/splunk-enterprise/get-started/deployment-capacity-manual/10.0/performance-reference/reference-hardware
+- Elastic — https://www.elastic.co/subscriptions ; https://www.elastic.co/docs/get-started/the-stack ; Kibana upload limit — https://www.elastic.co/docs/reference/kibana/advanced-settings

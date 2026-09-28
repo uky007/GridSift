@@ -9,20 +9,15 @@ far too large for a spreadsheet and too ad hoc for a SIEM ingest, and they
 are *evidence*: they must not be modified, and findings drawn from them
 must be reproducible.
 
-The usual answers each fail on one axis. Spreadsheets stop at a million
-rows. Text editors that handle huge files are Windows-only or commercial.
-Command-line CSV tools are fast and scale, but an investigation is
-interactive: search, pivot on a value, narrow to a time window, look at
-the rows, export the finding. Loading the file into a database or a
-notebook copies the evidence into a new form and loses the link to the
-original bytes. And many tools quietly reach out — for updates, telemetry
-or DNS — which an air-gapped forensic workstation cannot allow.
+gridsift opens such a file *as it is*, with bounded memory, shows rows
+immediately, hashes the file in the background, and keeps every step of
+the investigation — search, time range, enrichment, redaction — in a
+provenance manifest attached to what is exported. It never modifies the
+source and never touches the network.
 
-gridsift is built for exactly this situation. It opens the file *as it is*,
-with bounded memory, shows rows immediately, hashes the file in the
-background, and keeps every step of the investigation — search, time range,
-enrichment, redaction — in a provenance manifest attached to what is
-exported. It never modifies the source and never touches the network.
+The full case — the situation, who the tool is for, how it is used and why
+existing tools did not close the gap — is in [motivation.md](motivation.md);
+the comparison with existing tools is in [survey.md](survey.md).
 
 ## Concept
 

@@ -121,6 +121,7 @@ desktop walkthrough.
 
 ## Docs
 
+- [Why gridsift exists — the problem, who it is for, how it is used](docs/motivation.md)
 - [Description & feature list](docs/description.md)
 - [Installation](docs/installation.md)
 - [Usage & examples](docs/usage.md)
