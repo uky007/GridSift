@@ -125,6 +125,10 @@ pub enum Operation {
         from: String,
         to: String,
         matches: u64,
+        /// Year assumed for timestamp formats without one (syslog); part
+        /// of what the selection depends on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference_year: Option<i64>,
     },
     /// Column redaction applied to the output (no secrets recorded).
     Redact { policy: RedactionPolicy },
@@ -189,9 +193,20 @@ impl Manifest {
         serde_json::to_string_pretty(self).expect("manifest serialises")
     }
 
-    /// Atomic write (temp file + rename).
+    /// `<path>.tmp`, where the manifest is staged before the rename.
+    pub fn temp_path(path: &Path) -> PathBuf {
+        let mut name = path
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| "manifest".into());
+        name.push(".tmp");
+        path.with_file_name(name)
+    }
+
+    /// Atomic write (temp file + rename). Callers that hold the source
+    /// should use [`Manifest::write_for`], which also refuses to write over it.
     pub fn write(&self, path: &Path) -> io::Result<()> {
-        let tmp = path.with_extension("json.tmp");
+        let tmp = Manifest::temp_path(path);
         {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(self.to_json().as_bytes())?;
@@ -199,6 +214,14 @@ impl Manifest {
             f.sync_all()?;
         }
         fs::rename(&tmp, path)
+    }
+
+    /// [`Manifest::write`] after checking that neither `path` nor its
+    /// temporary file is the source.
+    pub fn write_for(&self, source: &Source, path: &Path) -> io::Result<()> {
+        source.guard_not_source(path)?;
+        source.guard_not_source(&Manifest::temp_path(path))?;
+        self.write(path)
     }
 
     pub fn read(path: &Path) -> io::Result<Manifest> {

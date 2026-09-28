@@ -73,6 +73,28 @@ were given `QOS_CLASS_USER_INITIATED`, macOS scheduled them on efficiency
 cores and the same build took 2.62 s — worth remembering for any background
 work in the GUI.
 
+### What "bounded memory" means, per operation
+
+The peak-RSS column above is for `index` and `count`: fixed read buffers
+plus the checkpoint table, identical at 1 and 10 GiB. Other operations add
+state that is proportional to their *result*, not to the file, and the
+desktop application adds its UI. Measured on the 1 GiB `narrow` file, warm
+cache, release build, commit `19feb5e` (2026-09-28):
+
+| operation | peak RSS | what the extra memory is |
+|---|---:|---|
+| `index` (SHA-256 on its own thread) | 34.5 MiB | read buffers, chunk pool for the hasher, checkpoint table |
+| `search` (10 threads, 483,485 matches) | 63 MiB | per-thread slice buffers, roaring bitmap of matches |
+| `freq -c dst_port` (exact, 64,477 distinct) | 86 MiB | per-worker count tables (capped at 131,072 entries each, then lossy) |
+| desktop: open + search + timeline | 239 MiB | the above plus the row cache (≤ 20,000 decoded rows), egui, the match set of every step kept in the lineage |
+| desktop: open + search + values | 217–323 MiB | as above; value tables for the counted column |
+
+Not bounded by design: a `--lookup` table is loaded whole (its size is the
+table's size), and every step kept in the desktop lineage keeps its match
+bitmap. On Windows the RSS measurement is not implemented and is shown as
+`n/a`; the 40–100 GB figures elsewhere in the documentation are targets
+until the cold-cache run on external storage is done.
+
 ### Search (same 1 GiB file, index present, warm cache)
 
 `gridsift search` cuts the file at index checkpoints into ~64 MiB ranges and

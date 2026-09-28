@@ -126,20 +126,46 @@ impl SparseIndex {
         self.source == id
     }
 
+    /// Write the sidecar. Refuses a target that carries the identity of the
+    /// indexed source (a copy of the evidence, or the evidence itself);
+    /// [`SparseIndex::save_for`] additionally checks the path against the
+    /// open source and is what callers should use.
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let bytes = self.to_bytes();
         let path = path.as_ref();
+        let tmp = temp_path(path);
+        for p in [path, tmp.as_path()] {
+            if let Ok(meta) = fs::metadata(p) {
+                if meta.is_file() && SourceId::from_metadata(&meta) == self.source {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "refusing to write the index over {}: it has the identity of the indexed source",
+                            p.display()
+                        ),
+                    ));
+                }
+            }
+        }
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
         // write-then-rename so a crash never leaves a half-written sidecar
-        let tmp = path.with_extension("tmp");
         {
             let mut f = fs::File::create(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
         }
         fs::rename(&tmp, path)
+    }
+
+    /// Write the sidecar after checking that neither the target nor its
+    /// temporary file is `source`.
+    pub fn save_for(&self, source: &Source, path: impl AsRef<Path>) -> io::Result<()> {
+        let path = path.as_ref();
+        source.guard_not_source(path)?;
+        source.guard_not_source(&temp_path(path))?;
+        self.save(path)
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<SparseIndex, IndexError> {
@@ -436,6 +462,17 @@ impl Sink for BuildSink<'_> {
 /// Minimal index that only knows where the header and the first data record
 /// are, so a viewport can be served immediately while the full build runs in
 /// the background. Touches only the first pages of the file.
+/// `<path>.tmp` next to the sidecar (appended, so `evidence.csv` can never
+/// map onto a sibling like `evidence.tmp`).
+fn temp_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| "index".into());
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
 pub fn bootstrap(source: &Source, params: IndexParams) -> SparseIndex {
     let mut idx = SparseIndex::new(source.id(), params);
     let mut st = BuildState {

@@ -161,7 +161,18 @@ The crate is split by responsibility; panels only draw and return
   what gets written.
 - "Show only matches" is switched on whenever a step is created; highlight
   mode (prev / next) is a toggle away.
-- No changes to `gridsift-core`.
+- A step's state (running / complete / cancelled / failed) is explicit
+  (`SelectionState`). Cancelled and failed steps are drawn in khaki with a
+  label, and nothing downstream — export, counts, timelines, nested
+  searches — accepts a lineage that contains one.
+- The search field has an *Exact* chip (whole-field equality); a click in
+  the Values tab uses it, so the pivot selects exactly the count shown.
+- The sidebar checks the source's size and modification time every two
+  seconds (and every scan checks before starting); a change shows a red
+  banner, cancels running work and disables export until the file is
+  reopened.
+- Opening a dataset for enrichment runs on a worker thread; the dialog
+  shows a spinner and keeps the UI responsive for large MMDB / CSV files.
 
 ## Deviations from the proposal, and open points
 

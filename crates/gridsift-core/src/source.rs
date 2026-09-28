@@ -151,6 +151,64 @@ impl Source {
         let meta = self.file.metadata()?;
         Ok(SourceId::from_metadata(&meta) == self.id)
     }
+
+    /// Fail unless the source still has the identity it was opened with.
+    /// This is a metadata check (size and modification time), not a
+    /// cryptographic one; it catches another process rewriting the file.
+    pub fn ensure_unchanged(&self) -> io::Result<()> {
+        if self.verify_unchanged()? {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{} changed since it was opened (size or modification time differ); reopen it",
+                self.path.display()
+            )))
+        }
+    }
+
+    /// Refuse a write target that is the evidence itself: by path, and —
+    /// when the target exists — by file identity (device and inode on Unix,
+    /// size and modification time everywhere). Every file gridsift writes
+    /// (exports, manifests, index sidecars and their temporaries) passes
+    /// through this check before anything is created.
+    pub fn guard_not_source(&self, target: &Path) -> io::Result<()> {
+        let refuse = || {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to write over the source file {}",
+                    self.path.display()
+                ),
+            ))
+        };
+        if let (Ok(a), Ok(b)) = (
+            std::fs::canonicalize(&self.path),
+            std::fs::canonicalize(target),
+        ) {
+            if a == b {
+                return refuse();
+            }
+        }
+        let Ok(meta) = std::fs::metadata(target) else {
+            return Ok(());
+        };
+        if !meta.is_file() {
+            return Ok(());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(mine) = self.file.metadata() {
+                if meta.dev() == mine.dev() && meta.ino() == mine.ino() {
+                    return refuse();
+                }
+            }
+        }
+        if SourceId::from_metadata(&meta) == self.id {
+            return refuse();
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for Source {

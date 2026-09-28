@@ -6,4 +6,6 @@
 # raw research material and local notes stay out of the public tree
 /survey/
 /notes/
+# local review reports stay out of the public tree
+/reviews/
 .claude/

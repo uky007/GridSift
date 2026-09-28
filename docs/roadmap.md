@@ -49,6 +49,12 @@ The go / no-go criteria for the whole project:
   touching the source.
 - **Signed manifests** (optional key) so an exported finding can be
   attributed as well as verified.
+- **Share-safe manifest variant**: relative paths and hashed query terms
+  for a manifest that leaves the case boundary, next to the complete one
+  that stays with the case.
+- **Project hygiene for a public repository**: CONTRIBUTING, SECURITY,
+  CHANGELOG, a CI job on the minimum supported Rust version, locked
+  dependencies for release builds.
 - **UTF-16 / encoding handling** and compressed input (`.gz`).
 - **Packaging**: `cargo install`, signed macOS / Windows builds, a Linux
   AppImage or static binary; a release workflow.

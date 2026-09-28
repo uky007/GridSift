@@ -11,7 +11,7 @@ use gridsift_core::hash::hex;
 use gridsift_core::sys::{group_thousands, human_bytes, iso8601_utc, peak_rss_bytes};
 
 use crate::document::{DockTab, Document};
-use crate::jobs::SelectionNode;
+use crate::jobs::{SelectionNode, SelectionState};
 use crate::theme::{
     self, AMBER, BLUE, CELL_TEXT, DIM, GREEN, HEADER_HEIGHT, HEADER_TEXT, KHAKI, RED, ROW_HEIGHT,
     ROW_NUMBER_TEXT, TEAL,
@@ -115,16 +115,13 @@ pub fn sidebar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                     columns_section(ui, d, &mut actions);
                     enrichment_section(ui, d, &mut actions);
                     ui.add_space(12.0);
-                    let ready =
-                        d.index_complete() && d.export.is_none() && !d.selection_running();
+                    let blocker = d.export_blocker();
                     let r = ui.add_enabled(
-                        ready,
+                        blocker.is_none(),
                         egui::Button::new(RichText::new("Export finding…").color(AMBER)),
                     );
-                    if r.on_disabled_hover_text(
-                        "available once indexing, the running scan and any running export have finished",
-                    )
-                    .clicked()
+                    if r.on_disabled_hover_text(blocker.unwrap_or_default())
+                        .clicked()
                     {
                         actions.push(Action::Export);
                     }
@@ -147,6 +144,24 @@ fn evidence_section(ui: &mut egui::Ui, d: &Document) {
         )
     };
     theme::section(ui, "EVIDENCE");
+    if d.source_changed {
+        egui::Frame::NONE
+            .fill(egui::Color32::from_rgb(0x5a, 0x1e, 0x1e))
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .show(ui, |ui| {
+                ui.label(RichText::new("SOURCE CHANGED ON DISK").strong().color(RED));
+                ui.label(
+                    RichText::new(
+                        "size or modification time differ from when the file was opened; \
+                         the digest, index and selection below are stale — reopen the file",
+                    )
+                    .size(11.5)
+                    .color(RED),
+                );
+            });
+        ui.add_space(4.0);
+    }
     egui::Grid::new("evidence-facts")
         .num_columns(2)
         .spacing([8.0, 3.0])
@@ -340,7 +355,13 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     actions.push(Action::Find);
                 }
-                theme::toggle_chip(ui, &mut d.search_ui.regex, "Regex");
+                // Regex and Exact are alternatives; the last one switched on wins
+                if theme::toggle_chip(ui, &mut d.search_ui.regex, "Regex") && d.search_ui.regex {
+                    d.search_ui.exact = false;
+                }
+                if theme::toggle_chip(ui, &mut d.search_ui.exact, "Exact") && d.search_ui.exact {
+                    d.search_ui.regex = false;
+                }
                 theme::toggle_chip(ui, &mut d.search_ui.ignore_case, "Aa");
                 theme::toggle_chip(ui, &mut d.search_ui.invert, "Invert");
                 let col_label = match d.search_ui.column {
@@ -390,14 +411,17 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                         ui.label(RichText::new("▶").size(9.0).color(DIM));
                     }
                     let is_current = k == last;
-                    let count = if node.running() {
-                        format!("{}…", group_thousands(node.count()))
-                    } else {
-                        group_thousands(node.count())
-                    };
+                    let state = node.state();
+                    let count = format!("{}{}", group_thousands(node.count()), state.label());
                     let text = format!("{}  {count}", node.op.describe(&d.header));
-                    let (clicked, closed) =
-                        theme::chip(ui, &text, if is_current { AMBER } else { DIM }, is_current);
+                    // a cancelled or failed step holds a partial result:
+                    // khaki, and nothing downstream will use it
+                    let color = match state {
+                        SelectionState::Cancelled | SelectionState::Failed(_) => KHAKI,
+                        _ if is_current => AMBER,
+                        _ => DIM,
+                    };
+                    let (clicked, closed) = theme::chip(ui, &text, color, is_current);
                     if clicked && !is_current {
                         actions.push(Action::RevertTo(node.clone()));
                     }

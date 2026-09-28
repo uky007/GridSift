@@ -34,17 +34,29 @@ activities (operations) → entity (output)* — not a full PROV document.
       "matches": 483485
     },
     {
+      "op": "search",
+      "query": { "pattern": "10.5.65.5", "kind": "exact",
+                 "case_insensitive": false, "columns": [1], "invert": false },
+      "matches": 4120
+    },
+    {
       "op": "time_range",
       "column": 0, "name": "timestamp",
       "from": "2026-09-22T14:00:00Z", "to": "2026-09-22T16:00:00Z",
-      "matches": 12331
+      "matches": 12331, "reference_year": 2026
     },
     {
       "op": "enrich",
       "rules": [
         { "column": 5, "name": "host", "provider": "domain",
           "derived": ["host.registrable", "host.suffix", "host.subdomain"],
-          "dataset": { "name": "public-suffix-list", "version": "2.1.238" } }
+          "dataset": { "name": "public-suffix-list", "kind": "psl", "version": "psl 2.1.238" } },
+        { "column": 1, "name": "src_ip", "provider": "lookup",
+          "derived": ["src_ip.owner", "src_ip.site"],
+          "dataset": { "name": "assets.csv", "kind": "csv", "size": 18234,
+                       "sha256": "9c1e…", "records": 412,
+                       "lookup": { "key": "ip", "values": ["owner", "site"],
+                                   "delimiter": ",", "quote": "\"", "header": true } } }
       ]
     },
     {
@@ -104,15 +116,17 @@ Each entry has an `op` tag:
 
 | `op` | fields | meaning |
 |---|---|---|
-| `search` | `query` (`pattern`, `kind` = `literal`/`regex`, `case_insensitive`, `columns` or `null` for all, `invert`), `matches` | the records matching the query, within the previous step |
-| `time_range` | `column`, `name`, `from`, `to` (ISO 8601 UTC, `to` exclusive), `matches` | the records whose timestamp column is in range, within the previous step |
-| `enrich` | `rules[]`: `column`, `name`, `provider` (`geoip`, `domain`, `lookup`), `derived` names, `dataset` (`name`, `size`, `sha256`, and for MMDB `database_type` and `build_epoch`; for the PSL its `version`) | derived columns appended to the output, identified by the exact dataset that produced them |
+| `search` | `query` (`pattern`, `kind` = `literal` / `regex` / `exact`, `case_insensitive`, `columns` or `null` for all, `invert`), `matches` | the records matching the query, within the previous step. `exact` means a whole field equals the pattern — the kind a value-count pivot records |
+| `time_range` | `column`, `name`, `from`, `to` (ISO 8601 UTC, `to` exclusive), `matches`, `reference_year` (the year assumed for timestamp formats that carry none, such as syslog) | the records whose timestamp column is in range, within the previous step |
+| `enrich` | `rules[]`: `column`, `name`, `provider` (`geoip`, `domain`, `lookup`), `derived` names, `dataset` (`name`, `kind`, `size`, `sha256`, `records`; for MMDB `database_type` and `built`; for the PSL its `version`; for a lookup table `lookup` = `key`, `values`, and the `delimiter` / `quote` / `header` it was parsed with) | derived columns appended to the output, identified by the exact dataset and join settings that produced them |
 | `redact` | `policy.rules[]`: `column`, `name`, `method` and its parameters | how columns were rewritten; for `hmac` only a fingerprint of the key (SHA-256 of the key, truncated) is recorded, never the key |
 
 Selection steps (`search`, `time_range`) are nested: each applies within
 the matches of the previous one, and `matches` is the count after that
 step. In the desktop application the same chain is what the lineage chips
-show.
+show. Only steps whose scan completed can reach a manifest: a cancelled or
+failed scan is refused for export, so a recorded count is always the count
+of a full pass.
 
 ### `output`
 
@@ -126,24 +140,62 @@ show.
 | `records`, `size` | what was written |
 | `sha256`, `blake3` | digests of the output file |
 
+## How an export is published
+
+1. The output plan is checked against the evidence: the output path, the
+   manifest path and both temporary files must not be the source (by path,
+   and by file identity if they exist).
+2. The source must still have the size and modification time it was
+   opened with; otherwise the export is refused.
+3. Records are written to a temporary file next to the output and hashed
+   as they are written.
+4. The source identity is checked again; then the manifest is written to
+   its own temporary file and renamed into place; then the output is
+   renamed into place. Both renames replace atomically.
+
+An interrupted overwrite therefore leaves the previous output and manifest
+intact. The one window that remains — a crash between the two renames —
+leaves a new manifest next to the older output, which `verify` reports as
+a mismatch; there is never an output without a manifest.
+
 ## Verification
 
 ```
 gridsift verify findings/beacon-1400-1600.csv
 gridsift verify findings/beacon-1400-1600.csv --source /mnt/evidence/proxy-2026-09.csv
+gridsift verify findings/beacon-1400-1600.csv --require-source
 gridsift verify findings/beacon-1400-1600.csv --skip-source
 ```
 
 `verify` re-hashes the output and, unless `--skip-source` is given, the
 source (at the manifest's path or at `--source`), compares both against the
 manifest, and prints the operations so the reader can see what the output
-claims to be. Any mismatch exits with code 1.
+claims to be. It states its **scope**: `output+source` when the source was
+found and matched — the output is then a verified derivation of that
+evidence — or `output-only` when the source was skipped or not found. Any
+mismatch exits with code 1; with `--require-source`, so does a missing
+source. In `--json` output the same appears as `scope` and
+`source_checked`.
 
 ## What the manifest does not claim
 
 - It does not prove *who* ran the export or *when* beyond the writer's
   clock; it is not signed. Signing is a candidate for a later version.
 - It records the transformation, not the analyst's reasoning.
+- It does not re-run anything: `verify` checks digests, it does not replay
+  the operations (the queries are stored verbatim so that a reader can).
+- The source-change check that guards an export is a metadata check (size
+  and modification time), which catches a rewritten file but is not a
+  cryptographic guarantee; the source digest in the manifest is.
 - `raw-records` outputs preserve each record's bytes, but record terminators
   are normalised to `terminator`; a byte-for-byte copy of the source is
   only obtained when the source used the same terminator throughout.
+
+## What the manifest reveals
+
+Everything needed to reproduce the finding: search patterns as typed,
+absolute paths of the source, the output and every dataset, dataset names
+and digests. Redacting a column of the output does not redact the manifest.
+Keep the full manifest with the case; before a manifest leaves the case
+boundary, review it — a share-safe variant (relative paths, hashed query
+terms) is on the roadmap.

@@ -9,6 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::dialect::Dialect;
 use crate::hash::hex;
 
 /// Root of gridsift's cache tree (`~/Library/Caches/gridsift`,
@@ -20,10 +21,20 @@ pub fn cache_root() -> PathBuf {
         .join("gridsift")
 }
 
-/// Default location of the sparse index for `source`.
-pub fn default_index_path(source: &Path) -> io::Result<PathBuf> {
+/// Default location of the sparse index for `source` parsed with `dialect`.
+///
+/// The dialect is part of the key: an index records where records start,
+/// and that depends on the delimiter, quoting and header settings, so a
+/// file opened with `--no-header` must not pick up the index that was built
+/// with a header.
+pub fn default_index_path(source: &Path, dialect: Dialect) -> io::Result<PathBuf> {
     let canon = fs::canonicalize(source)?;
-    let key = hex(&blake3::hash(canon.to_string_lossy().as_bytes()).as_bytes()[..16]);
+    let mut keyed = canon.to_string_lossy().into_owned().into_bytes();
+    keyed.push(0);
+    keyed.push(dialect.delimiter);
+    keyed.push(dialect.quote.unwrap_or(0));
+    keyed.push(u8::from(dialect.has_header));
+    let key = hex(&blake3::hash(&keyed).as_bytes()[..16]);
     let stem = source
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -45,10 +56,17 @@ mod tests {
         let b = dir.join("b.csv");
         fs::write(&a, b"x\n").unwrap();
         fs::write(&b, b"x\n").unwrap();
-        let pa = default_index_path(&a).unwrap();
-        let pb = default_index_path(&b).unwrap();
-        assert_eq!(pa, default_index_path(&a).unwrap());
+        let d = Dialect::default();
+        let pa = default_index_path(&a, d).unwrap();
+        let pb = default_index_path(&b, d).unwrap();
+        assert_eq!(pa, default_index_path(&a, d).unwrap());
         assert_ne!(pa, pb);
+        // the same file parsed differently gets its own sidecar
+        let no_header = Dialect {
+            has_header: false,
+            ..d
+        };
+        assert_ne!(pa, default_index_path(&a, no_header).unwrap());
         assert!(pa.starts_with(cache_root()));
         assert!(
             pa.file_name()
@@ -57,6 +75,6 @@ mod tests {
                 .starts_with("a.csv.")
         );
         assert!(pa.extension().is_some_and(|e| e == "gsix"));
-        assert!(default_index_path(&dir.join("missing.csv")).is_err());
+        assert!(default_index_path(&dir.join("missing.csv"), d).is_err());
     }
 }

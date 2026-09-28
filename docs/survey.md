@@ -52,7 +52,7 @@ into a server-side index.
 
 | Tool | Licence · platforms | Large input (project's own claim) | Offline · provenance | Position |
 |---|---|---|---|---|
-| **EmEditor** | proprietary; Free (personal use only, no CSV tools) / Professional subscription; Windows | "up to 16 TB or 1,099 billion lines" using temporary files; vendor benchmark: open a 10 GB file in 1.067 s, sort it in 7.271 s | "privacy-first" listed without detail; no hashing | the performance reference for huge text and CSV editing |
+| **EmEditor** | proprietary; Free (personal use only, no CSV tools) / Professional subscription; Windows | "up to 16 TB or 1,099 billion lines" using temporary files; vendor benchmark: open a 10 GB file in 1.067 s, sort it in 7.271 s; the CSV mode handles newlines embedded in cells and offers filter, sort, join and pivot tables | "privacy-first" listed without detail; no hashing | the performance reference for huge text and CSV editing |
 | **Modern CSV** (v3 beta) | proprietary freemium; Windows, macOS, Linux | v3 beta: "more than 100 million rows", "Stream Editing Mode for ultra-large files on low-memory systems"; read-only mode with "a small memory footprint" | "Your data remains local. It's never sent to the cloud"; no hashing | editor with charts and Python plugins (beta build expires 2026-12-31) |
 | **CEESVEE** | MIT; Windows, macOS, Linux (Tauri v2, Rust core, React UI) | "Multi-GB files open read-only against a streaming record index … with bounded memory"; 1M rows / 100 MB+ is "a core requirement" | "no telemetry, no analytics, and no network calls"; exports can write "a JSON manifest recording row counts and SHA-256 hashes" | the closest OSS editor in spirit; charts and scripting are v1 non-goals |
 | **LeanRows** | MIT; Windows x64 | "20,000,001 rows, 1,532,454,643 bytes, fully indexed. Peak working set: 18.4 MB"; record boundaries "quote-aware across read blocks, including quoted fields containing newlines" | "no telemetry and no network access of any kind" | read-only viewer; the closest precedent for the evidence-safe viewer part of gridsift |
@@ -119,7 +119,7 @@ today.
 | Capability | Timeline Explorer | EmEditor | Modern CSV | CEESVEE | LeanRows | klogg | qsv | DuckDB CLI | Timesketch | gridsift |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
 | Files larger than RAM | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (server) | ✓ |
-| Quoted multi-line fields are records | ✓ | ~ | ✓ | ~ | ✓ | — | ✓ | ✓ | ~ | ✓ |
+| Quoted multi-line fields are records | ✓ | ✓ | ✓ | ~ | ✓ | — | ✓ | ✓ | ~ | ✓ |
 | Interactive GUI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | — | ✓ (web) | ✓ |
 | Cross-platform | — | — | ✓ | ✓ | — | ✓ | ✓ | ✓ | ~ | ✓ |
 | Open source | — | — | — | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -180,7 +180,7 @@ Pages consulted on 2026-09-28.
 - Hayabusa — https://github.com/Yamato-Security/hayabusa ; Takajo — https://github.com/Yamato-Security/takajo ; Chainsaw — https://github.com/WithSecureLabs/chainsaw
 
 **Viewers and editors**
-- EmEditor — https://www.emeditor.com/ ; https://www.emeditor.com/text-editor-features/emeditor-free/
+- EmEditor — https://www.emeditor.com/ ; https://www.emeditor.com/text-editor-features/emeditor-free/ ; CSV features (embedded newlines, pivot) — https://www.emeditor.com/text-editor-features/more-features/csv-tsv-dsv/ ; https://www.emeditor.com/faq/csv-faq/how-do-you-remove-embedded-newlines-in-a-csv-document/
 - Modern CSV — https://www.moderncsv.com/ ; https://www.moderncsv.com/v3-beta/
 - CEESVEE — https://github.com/soldforaloss/ceesvee ; https://ceesvee.com/
 - LeanRows — https://github.com/abooodbah/leanrows

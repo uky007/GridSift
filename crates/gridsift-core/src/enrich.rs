@@ -52,6 +52,22 @@ pub struct DatasetInfo {
     pub version: Option<String>,
     /// Rows loaded for a lookup table.
     pub records: Option<u64>,
+    /// How a lookup table was joined and parsed (lookup datasets only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup: Option<LookupInfo>,
+}
+
+/// The settings that determine what a lookup join yields, recorded so the
+/// same manifest reproduces the same derived columns: which column of the
+/// table was the key, which columns were taken as values, and how the
+/// table itself was parsed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupInfo {
+    pub key: String,
+    pub values: Vec<String>,
+    pub delimiter: String,
+    pub quote: Option<String>,
+    pub header: bool,
 }
 
 /// What a GeoIP lookup can yield; fields absent from the database stay `None`.
@@ -137,6 +153,7 @@ impl GeoIpDb {
             built: Some(iso8601_utc(meta.build_epoch)),
             version: None,
             records: None,
+            lookup: None,
         };
         Ok(GeoIpDb { reader, kind, info })
     }
@@ -295,6 +312,16 @@ impl LookupTable {
             built: None,
             version: None,
             records: Some(records),
+            lookup: Some(LookupInfo {
+                key: header
+                    .get(key_col)
+                    .cloned()
+                    .unwrap_or_else(|| format!("col{key_col}")),
+                values: value_names.clone(),
+                delimiter: (d.delimiter as char).to_string(),
+                quote: d.quote.map(|q| (q as char).to_string()),
+                header: d.has_header,
+            }),
         };
         Ok(LookupTable {
             map,
@@ -385,6 +412,7 @@ impl Provider {
                 built: None,
                 version: Some(format!("psl {PSL_VERSION}")),
                 records: None,
+                lookup: None,
             }),
             Provider::Lookup(t) => Some(t.info().clone()),
         }
@@ -593,6 +621,7 @@ mod tests {
                     built: Some("2026-09-01T00:00:00Z".into()),
                     version: None,
                     records: None,
+                    lookup: None,
                 },
                 kind,
             })

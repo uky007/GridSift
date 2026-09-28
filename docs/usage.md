@@ -14,6 +14,7 @@ gridsift index   FILE                     # sparse index + SHA-256 in one pass
 gridsift rows    FILE -s 3000000 -n 5     # records by ordinal (0-based, header excluded)
 gridsift search  FILE '/c2/beacon' -c path -n 5          # literal, one column
 gridsift search  FILE -r 'deny,"curl/[0-9.]+"'           # regex, all cores
+gridsift search  FILE 10.0.0.1 -c src_ip --exact         # whole field only: not 10.0.0.10
 gridsift search  FILE allow -v                           # records that do NOT match
 gridsift freq    FILE -c host -n 20                      # top hosts over all records
 gridsift freq    FILE -c dst_port -s ',deny,'            # …over the records matching a search
@@ -34,12 +35,12 @@ gridsift gen     --profile narrow --size 10G -o narrow-10g.csv   # synthetic dat
 | `info` | Sniff the dialect and show the first records without scanning the file |
 | `index` | Build the sparse record index and the source digest in one pass (`--hash sha256\|blake3\|all\|none`, `--stride-records`, `--stride-bytes`, `--index PATH`) |
 | `rows` | Print records by ordinal using the index (`-s START -n COUNT`, `--raw` for the exact bytes) |
-| `search` | Literal or regex (`-r`) search; `-i` case-insensitive, `-c COLUMN` (repeatable), `-v` invert, `-n` records to print, `--threads` |
+| `search` | Literal, regex (`-r`) or exact-field (`--exact`) search; `-i` case-insensitive, `-c COLUMN` (repeatable), `-v` invert, `-n` records to print, `--threads`. `--exact` selects records where the whole field equals the pattern (`10.0.0.1` does not select `10.0.0.10`); it is what a value-count pivot uses, and the `-s` searches of `freq`, `timeline` and `export` accept it too |
 | `freq` | Count the values of one column, top-N, over all records or a search's matches; enrichment options add derived columns to count |
 | `timeline` | Count records per time bucket of a timestamp column (`-b auto\|30s\|5m\|1h\|1d`, `--year` for syslog timestamps) |
 | `profile` | Detect what each column holds from a sample across the file |
 | `export` | Write all records, a `--range START:COUNT`, or a search's matches to a new file with a manifest; `--redact`, `--geoip`, `--domain`, `--lookup`, `--omit-header`, `--crlf`, `-f` |
-| `verify` | Verify an exported file (and its source, if present) against its manifest; exit code 1 on mismatch |
+| `verify` | Verify an exported file (and its source, if present) against its manifest and report the scope — `output+source` when the source was found and matched, `output-only` otherwise; `--require-source` turns a missing source into a failure; `--source PATH` says where the evidence is now; exit code 1 on mismatch |
 | `count` | Count records with a full quote-aware scan, writing nothing |
 | `hash` | Compute digests of any file |
 | `gen` | Generate a deterministic synthetic dataset (`--profile narrow\|wide\|quotes\|ragged`, `--size` or `--rows`, `--seed`) |
@@ -69,8 +70,49 @@ gridsift export proxy.csv -o shareable.csv -s '/c2/beacon' -c path \
 
 Untouched columns keep their exact bytes. Enrichment sees the original
 value even when the source column is redacted. The manifest records the
-redaction policy (with a key fingerprint, never the key) and every dataset
-by name, size and SHA-256 — see [manifest.md](manifest.md).
+redaction policy (with a key fingerprint, never the key), every dataset by
+name, size and SHA-256, and for lookups the key and value columns used —
+see [manifest.md](manifest.md).
+
+### What gridsift refuses to do
+
+- Write over the evidence, under any name: the output, its manifest, the
+  index sidecar and every temporary file are checked against the source
+  (by path and by file identity) before anything is created.
+- Overwrite an existing output without `-f`.
+- Export from a source that changed on disk since it was opened (size or
+  modification time differ); reopen it instead. Within one `gridsift`
+  command the window is short, but the check runs before the export
+  starts and again before it is published.
+- Reuse a cached index that was built with different parser settings:
+  `--no-header`, `-d` and `--no-quote` get their own sidecar, so the same
+  explicit options give the same records with or without a cache.
+
+An export publishes the manifest first and then the output, each by
+atomic rename, so the destination never holds an output without its
+provenance, and an interrupted overwrite leaves the previous files intact.
+
+### Before sharing a manifest
+
+The manifest is deliberately complete: it holds the search patterns,
+absolute paths and dataset names that make the finding reproducible.
+Redacting a column does not remove a username that was typed as a search
+term, and paths may reveal case names. Keep the full manifest with the
+case; review it (or strip `source.path`, `output.path` and the queries)
+before it leaves the case boundary.
+
+### Memory
+
+The source is never loaded into memory. Fixed read buffers and the sparse
+index are what the index pass and record navigation use (about 35 MiB at
+both 1 GiB and 10 GiB on the reference machine). Searches add a compressed
+bitmap of matching records; counts keep a capped table per worker and
+switch to lossy counting beyond it; lookup tables are loaded whole; the
+desktop application keeps a row cache and its UI on top (~200–300 MiB on
+a 1 GiB file). Every command prints its own peak RSS; on Windows the
+measurement is not available and is shown as `n/a`. The numbers, the
+machine and the cache state behind each claim are in
+[../bench/README.md](../bench/README.md).
 
 ### jq recipes
 
@@ -113,13 +155,19 @@ demos and screenshots.
   with its detected type; a click opens the column menu: *Count values ·
   Timeline · Search in this column · Enrich… · Redact on export…*. Then the
   active enrichment rules and **Export finding…**.
-- **Command bar** — one search field with *Regex*, *Aa* (case-insensitive),
-  *Invert* and a column chip. Under it the **selection lineage** as chips,
-  each with its match count: `"/c2/beacon" 483,485 ▶ timestamp 09-22 14:00
-  – 16:00 12,331`. Clicking a chip reverts to that step (no rescan), × on
-  the last chip removes it, *clear* drops the selection. *show only
-  matches* toggles between the filtered view and highlight mode with
-  prev / next.
+- **Command bar** — one search field with *Regex*, *Exact* (whole-field
+  match), *Aa* (case-insensitive), *Invert* and a column chip. Under it the
+  **selection lineage** as chips, each with its match count:
+  `"/c2/beacon" 483,485 ▶ timestamp 09-22 14:00 – 16:00 12,331`. Clicking
+  a chip reverts to that step (no rescan), × on the last chip removes it,
+  *clear* drops the selection. *show only matches* toggles between the
+  filtered view and highlight mode with prev / next. A step whose scan was
+  cancelled or failed is shown in khaki with *(cancelled)* / *(failed)*:
+  it cannot be exported, counted, charted or searched within — remove it.
+- **Source changed** — the file's size and modification time are checked
+  every couple of seconds and before every scan and export. If they
+  differ from what was opened, a red banner appears in the sidebar, running
+  work is cancelled and exports are disabled until the file is reopened.
 - **Grid** — virtual rows over the index; typed headers; derived columns in
   green. *Go to row* jumps by ordinal.
 - **Analysis dock** — *Timeline* (drag a range on the chart → *Filter to
@@ -137,7 +185,8 @@ demos and screenshots.
 3. From the `timestamp` column, *Timeline*. Drag across the spike, *Filter
    to range* — a second chip, 12,331 records.
 4. From `src_ip`, *Count values*: the top talkers within the range. Click
-   one — a third chip.
+   one — a third chip, an exact-field match, so it selects precisely the
+   rows the count showed.
 5. *Enrich…* → `host` → Domain; `host.registrable` appears in green.
 6. **Export finding…** shows the lineage, lets you redact `user` (HMAC)
    and drop `user_agent`, and writes `beacon-1400-1600.csv` next to its

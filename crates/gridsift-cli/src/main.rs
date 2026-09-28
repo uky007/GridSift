@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gridsift_core::dialect::sniff;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
-use gridsift_core::export::{ExportOptions, Selection, Terminator, export};
+use gridsift_core::export::{ExportOptions, Selection, Terminator, export_pending};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
 use gridsift_core::hash::{MultiHasher, hash_source, hex};
 use gridsift_core::index::{BuildOptions, IndexParams, SparseIndex, bootstrap, build_index};
@@ -112,8 +112,11 @@ enum Cmd {
         #[command(flatten)]
         dialect: DialectArgs,
         /// Interpret the pattern as a regular expression
-        #[arg(long, short = 'r')]
+        #[arg(long, short = 'r', conflicts_with = "exact")]
         regex: bool,
+        /// Match whole fields only (`10.0.0.1` does not select `10.0.0.10`)
+        #[arg(long)]
+        exact: bool,
         /// Case-insensitive matching
         #[arg(long, short = 'i')]
         ignore_case: bool,
@@ -146,8 +149,11 @@ enum Cmd {
         #[arg(long, short = 's')]
         search: Option<String>,
         /// Interpret the pattern as a regular expression
-        #[arg(long, short = 'r', requires = "search")]
+        #[arg(long, short = 'r', requires = "search", conflicts_with = "exact")]
         regex: bool,
+        /// Match whole fields only (`10.0.0.1` does not select `10.0.0.10`)
+        #[arg(long, requires = "search")]
+        exact: bool,
         /// Case-insensitive matching
         #[arg(long, short = 'i', requires = "search")]
         ignore_case: bool,
@@ -197,8 +203,13 @@ enum Cmd {
         #[arg(long)]
         source: Option<PathBuf>,
         /// Only check the output, not the source
-        #[arg(long)]
+        #[arg(long, conflicts_with = "require_source")]
         skip_source: bool,
+        /// Fail unless the source is present and matches too (a missing
+        /// source is otherwise reported as "not found" and the output-only
+        /// check decides)
+        #[arg(long)]
+        require_source: bool,
     },
     /// Count the values of one column (top-N), over all records or a search's matches
     Freq {
@@ -215,8 +226,11 @@ enum Cmd {
         #[arg(long, short = 's')]
         search: Option<String>,
         /// Interpret the pattern as a regular expression
-        #[arg(long, short = 'r', requires = "search")]
+        #[arg(long, short = 'r', requires = "search", conflicts_with = "exact")]
         regex: bool,
+        /// Match whole fields only
+        #[arg(long, requires = "search")]
+        exact: bool,
         /// Case-insensitive matching
         #[arg(long, short = 'i', requires = "search")]
         ignore_case: bool,
@@ -250,8 +264,11 @@ enum Cmd {
         #[arg(long, short = 's')]
         search: Option<String>,
         /// Interpret the pattern as a regular expression
-        #[arg(long, short = 'r', requires = "search")]
+        #[arg(long, short = 'r', requires = "search", conflicts_with = "exact")]
         regex: bool,
+        /// Match whole fields only
+        #[arg(long, requires = "search")]
+        exact: bool,
         /// Case-insensitive matching
         #[arg(long, short = 'i', requires = "search")]
         ignore_case: bool,
@@ -515,6 +532,7 @@ fn main() {
             pattern,
             dialect,
             regex,
+            exact,
             ignore_case,
             column,
             invert,
@@ -527,6 +545,7 @@ fn main() {
             &pattern,
             SearchArgs {
                 regex,
+                exact,
                 ignore_case,
                 columns: column,
                 invert,
@@ -542,6 +561,7 @@ fn main() {
             dialect,
             search,
             regex,
+            exact,
             ignore_case,
             column,
             invert,
@@ -561,6 +581,7 @@ fn main() {
                 output,
                 search,
                 regex,
+                exact,
                 ignore_case,
                 columns: column,
                 invert,
@@ -581,7 +602,8 @@ fn main() {
             manifest,
             source,
             skip_source,
-        } => cmd_verify(&output, manifest, source, skip_source, json),
+            require_source,
+        } => cmd_verify(&output, manifest, source, skip_source, require_source, json),
         Cmd::Freq {
             file,
             column,
@@ -589,6 +611,7 @@ fn main() {
             dialect,
             search,
             regex,
+            exact,
             ignore_case,
             invert,
             threads,
@@ -602,6 +625,7 @@ fn main() {
                 top,
                 search,
                 regex,
+                exact,
                 ignore_case,
                 invert,
                 threads,
@@ -618,6 +642,7 @@ fn main() {
             dialect,
             search,
             regex,
+            exact,
             ignore_case,
             invert,
             year,
@@ -632,6 +657,7 @@ fn main() {
                 max_buckets,
                 search,
                 regex,
+                exact,
                 ignore_case,
                 invert,
                 year,
@@ -872,7 +898,7 @@ fn cmd_info(file: &Path, rows: usize, args: &DialectArgs, json: bool) -> Result<
     eprintln!(
         "({:.1} ms, peak RSS {})",
         elapsed.as_secs_f64() * 1000.0,
-        human_bytes(peak_rss_bytes())
+        rss_text(peak_rss_bytes())
     );
     Ok(())
 }
@@ -886,10 +912,7 @@ fn cmd_index(file: &Path, args: &DialectArgs, opts: IndexOpts, json: bool) -> Re
         stride_records: opts.stride_records,
         stride_bytes: opts.stride_bytes,
     };
-    let index_path = match opts.index_path {
-        Some(p) => p,
-        None => default_index_path(file)?,
-    };
+    let index_path = index_location(file, &src, params, opts.index_path)?;
     let pb = progress_bar(src.len(), json);
     let t0 = Instant::now();
     let idx = build_index(
@@ -906,7 +929,7 @@ fn cmd_index(file: &Path, args: &DialectArgs, opts: IndexOpts, json: bool) -> Re
     .context("indexing")?;
     let elapsed = t0.elapsed();
     pb.finish_and_clear();
-    idx.save(&index_path)
+    idx.save_for(&src, &index_path)
         .with_context(|| format!("writing index to {}", index_path.display()))?;
     let index_bytes = fs::metadata(&index_path).map(|m| m.len()).unwrap_or(0);
     let rss = peak_rss_bytes();
@@ -931,7 +954,7 @@ fn cmd_index(file: &Path, args: &DialectArgs, opts: IndexOpts, json: bool) -> Re
             "blake3": idx.digests.blake3.map(|d| hex(&d)),
             "elapsed_s": elapsed.as_secs_f64(),
             "throughput_mib_s": mib_per_s(src.len(), elapsed),
-            "peak_rss_bytes": rss,
+            "peak_rss_bytes": rss_json(rss),
         }));
     }
     println!(
@@ -972,7 +995,7 @@ fn cmd_index(file: &Path, args: &DialectArgs, opts: IndexOpts, json: bool) -> Re
         "Time        {:.2} s ({:.0} MiB/s), peak RSS {}",
         elapsed.as_secs_f64(),
         mib_per_s(src.len(), elapsed),
-        human_bytes(rss)
+        rss_text(rss)
     );
     Ok(())
 }
@@ -993,21 +1016,7 @@ fn cmd_rows(
         scan_start: sn.scan_start,
         ..IndexParams::default()
     };
-    let path = match index_path {
-        Some(p) => p,
-        None => default_index_path(file)?,
-    };
-    let (idx, from_index) = match SparseIndex::load(&path) {
-        Ok(idx) if idx.matches_source(src.id()) => (idx, true),
-        Ok(_) => {
-            eprintln!(
-                "warning: index at {} was built for a different version of this file; scanning instead",
-                path.display()
-            );
-            (bootstrap(&src, params), false)
-        }
-        Err(_) => (bootstrap(&src, params), false),
-    };
+    let (idx, from_index) = load_index(file, &src, params, index_path)?;
     // The index knows the dialect it was built with; honour it over the sniff.
     let t0 = Instant::now();
     let cp = idx.locate(start);
@@ -1066,7 +1075,7 @@ fn cmd_rows(
             "#{}@{}",
             c.record, c.offset
         )),
-        human_bytes(peak_rss_bytes())
+        rss_text(peak_rss_bytes())
     );
     Ok(())
 }
@@ -1110,7 +1119,7 @@ fn cmd_count(file: &Path, args: &DialectArgs, chunk_size: u64, json: bool) -> Re
             "max_record_bytes": idx.stats.max_record_bytes,
             "elapsed_s": elapsed.as_secs_f64(),
             "throughput_mib_s": mib_per_s(src.len(), elapsed),
-            "peak_rss_bytes": rss,
+            "peak_rss_bytes": rss_json(rss),
         }));
     }
     println!("{}", idx.stats.records);
@@ -1122,7 +1131,7 @@ fn cmd_count(file: &Path, args: &DialectArgs, chunk_size: u64, json: bool) -> Re
         idx.stats.unterminated_quotes,
         elapsed.as_secs_f64(),
         mib_per_s(src.len(), elapsed),
-        human_bytes(rss)
+        rss_text(rss)
     );
     Ok(())
 }
@@ -1209,6 +1218,7 @@ fn cmd_gen(
 
 struct SearchArgs {
     regex: bool,
+    exact: bool,
     ignore_case: bool,
     columns: Vec<String>,
     invert: bool,
@@ -1217,27 +1227,65 @@ struct SearchArgs {
     index_path: Option<PathBuf>,
 }
 
-/// Load the sidecar index if it exists and matches, else bootstrap one.
+fn pattern_kind(regex: bool, exact: bool) -> PatternKind {
+    if exact {
+        PatternKind::Exact
+    } else if regex {
+        PatternKind::Regex
+    } else {
+        PatternKind::Literal
+    }
+}
+
+/// Where the index for `file` lives: `--index PATH`, else the cache entry
+/// for this file *and* these parser settings. The path is checked against
+/// the source, so `--index evidence.csv` is refused.
+fn index_location(
+    file: &Path,
+    src: &Source,
+    params: IndexParams,
+    index_path: Option<PathBuf>,
+) -> Result<PathBuf> {
+    let path = match index_path {
+        Some(p) => p,
+        None => default_index_path(file, params.dialect)?,
+    };
+    src.guard_not_source(&path)?;
+    Ok(path)
+}
+
+/// A usable sidecar at `path`, or the reason it is not: it must have been
+/// built from this version of the file *and* with the requested parser
+/// settings — an explicit `--no-header` must not pick up an index built
+/// with a header.
+fn usable_index(path: &Path, src: &Source, params: IndexParams) -> Result<SparseIndex, String> {
+    let idx = SparseIndex::load(path).map_err(|e| e.to_string())?;
+    if !idx.matches_source(src.id()) {
+        return Err("it was built for a different version of this file".into());
+    }
+    if idx.params.dialect != params.dialect || idx.params.scan_start != params.scan_start {
+        return Err("it was built with different parser settings".into());
+    }
+    Ok(idx)
+}
+
+/// Load the sidecar index if it exists and fits, else bootstrap one.
 fn load_index(
     file: &Path,
     src: &Source,
     params: IndexParams,
     index_path: Option<PathBuf>,
 ) -> Result<(SparseIndex, bool)> {
-    let path = match index_path {
-        Some(p) => p,
-        None => default_index_path(file)?,
-    };
-    Ok(match SparseIndex::load(&path) {
-        Ok(idx) if idx.matches_source(src.id()) => (idx, true),
-        Ok(_) => {
-            eprintln!(
-                "warning: index at {} was built for a different version of this file; ignoring it",
-                path.display()
-            );
+    let explicit = index_path.is_some();
+    let path = index_location(file, src, params, index_path)?;
+    Ok(match usable_index(&path, src, params) {
+        Ok(idx) => (idx, true),
+        Err(why) => {
+            if explicit || path.exists() {
+                eprintln!("warning: ignoring index at {}: {why}", path.display());
+            }
             (bootstrap(src, params), false)
         }
-        Err(_) => (bootstrap(src, params), false),
     })
 }
 
@@ -1288,11 +1336,7 @@ fn cmd_search(
     let columns = resolve_columns(&o.columns, header.as_deref())?;
     let query = SearchQuery {
         pattern: pattern.to_string(),
-        kind: if o.regex {
-            PatternKind::Regex
-        } else {
-            PatternKind::Literal
-        },
+        kind: pattern_kind(o.regex, o.exact),
         case_insensitive: o.ignore_case,
         columns,
         invert: o.invert,
@@ -1337,13 +1381,8 @@ fn cmd_search(
         return print_json(&json!({
             "file": file.display().to_string(),
             "size": src.len(),
-            "query": {
-                "pattern": query.pattern,
-                "regex": o.regex,
-                "ignore_case": o.ignore_case,
-                "columns": query.columns,
-                "invert": o.invert,
-            },
+            // the query exactly as a manifest would record it
+            "query": query,
             "matches": matches.len(),
             "records_scanned": outcome.records_scanned,
             "complete": outcome.complete,
@@ -1352,7 +1391,7 @@ fn cmd_search(
             "ranges": outcome.ranges,
             "elapsed_s": outcome.elapsed.as_secs_f64(),
             "throughput_mib_s": mib_per_s(outcome.bytes_scanned, outcome.elapsed),
-            "peak_rss_bytes": rss,
+            "peak_rss_bytes": rss_json(rss),
             "records": records,
         }));
     }
@@ -1374,7 +1413,7 @@ fn cmd_search(
         mib_per_s(outcome.bytes_scanned, outcome.elapsed),
         outcome.threads,
         outcome.ranges,
-        human_bytes(rss)
+        rss_text(rss)
     );
     Ok(())
 }
@@ -1405,12 +1444,9 @@ fn ensure_full_index(
     index_path: Option<PathBuf>,
     json: bool,
 ) -> Result<SparseIndex> {
-    let path = match index_path {
-        Some(p) => p,
-        None => default_index_path(file)?,
-    };
-    if let Ok(idx) = SparseIndex::load(&path) {
-        if idx.matches_source(src.id()) && idx.stats.complete && idx.digests.sha256.is_some() {
+    let path = index_location(file, src, params, index_path)?;
+    if let Ok(idx) = usable_index(&path, src, params) {
+        if idx.stats.complete && idx.digests.sha256.is_some() {
             return Ok(idx);
         }
     }
@@ -1426,7 +1462,7 @@ fn ensure_full_index(
     })
     .context("indexing")?;
     pb.finish_and_clear();
-    idx.save(&path)
+    idx.save_for(src, &path)
         .with_context(|| format!("writing index to {}", path.display()))?;
     Ok(idx)
 }
@@ -1454,6 +1490,7 @@ struct ExportArgs {
     output: PathBuf,
     search: Option<String>,
     regex: bool,
+    exact: bool,
     ignore_case: bool,
     columns: Vec<String>,
     invert: bool,
@@ -1548,11 +1585,7 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         let columns = resolve_columns(&o.columns, header.as_deref())?;
         let query = SearchQuery {
             pattern: pattern.clone(),
-            kind: if o.regex {
-                PatternKind::Regex
-            } else {
-                PatternKind::Literal
-            },
+            kind: pattern_kind(o.regex, o.exact),
             case_insensitive: o.ignore_case,
             columns,
             invert: o.invert,
@@ -1639,15 +1672,21 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         enrichment: enrichment.as_ref(),
         ..ExportOptions::default()
     };
+    // the whole output plan — CSV, manifest and their temporaries — is
+    // checked against the evidence before anything is written
+    let mpath = Manifest::path_for(&o.output);
+    src.guard_not_source(&mpath)?;
+    src.guard_not_source(&Manifest::temp_path(&mpath))?;
     let pb = progress_bar(expected, json);
-    let rep = export(&src, &idx, selection, opts, &o.output, &mut |records, _| {
+    let pending = export_pending(&src, &idx, selection, opts, &o.output, &mut |records, _| {
         pb.set_position(records)
     })
     .with_context(|| format!("exporting to {}", o.output.display()))?;
     pb.finish_and_clear();
+    let rep = pending.report().clone();
 
-    // manifest next to the output
-    let out_path = fs::canonicalize(&o.output).unwrap_or_else(|_| o.output.clone());
+    // manifest next to the output, committed before the output itself
+    let out_path = std::path::absolute(&o.output).unwrap_or_else(|_| o.output.clone());
     let manifest = Manifest::new(
         SourceInfo::from_source(
             &src,
@@ -1679,10 +1718,9 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
             blake3: rep.digests.blake3.map(|d| hex(&d)),
         },
     );
-    let mpath = Manifest::path_for(&o.output);
-    manifest
-        .write(&mpath)
-        .with_context(|| format!("writing manifest to {}", mpath.display()))?;
+    let rep = pending
+        .commit(Some(&manifest))
+        .with_context(|| format!("publishing {} and its manifest", o.output.display()))?;
 
     if json {
         return print_json(&json!({
@@ -1716,11 +1754,29 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
     Ok(())
 }
 
+/// Peak RSS for humans; the measurement is not available on every platform.
+fn rss_text(rss: u64) -> String {
+    if rss == 0 {
+        "n/a".into()
+    } else {
+        human_bytes(rss)
+    }
+}
+
+fn rss_json(rss: u64) -> serde_json::Value {
+    if rss == 0 {
+        serde_json::Value::Null
+    } else {
+        json!(rss)
+    }
+}
+
 fn cmd_verify(
     output: &Path,
     manifest_path: Option<PathBuf>,
     source_override: Option<PathBuf>,
     skip_source: bool,
+    require_source: bool,
     json: bool,
 ) -> Result<()> {
     let mpath = manifest_path.unwrap_or_else(|| Manifest::path_for(output));
@@ -1750,13 +1806,24 @@ fn cmd_verify(
         let ok = m.source.sha256.as_deref() == Some(sha.as_str()) && m.source.size == s.len();
         (if ok { "ok" } else { "MISMATCH" }, Some(sha))
     };
-    let all_ok = out_ok && source_status != "MISMATCH";
+    // What this run actually established: with the source present and
+    // matching, the output is a verified derivation of that evidence; with
+    // the source skipped or absent, only the output's own digest was checked.
+    let source_checked = source_status == "ok";
+    let scope = if source_checked {
+        "output+source"
+    } else {
+        "output-only"
+    };
+    let all_ok = out_ok && source_status != "MISMATCH" && (!require_source || source_checked);
 
     if json {
         print_json(&json!({
             "manifest": mpath.display().to_string(),
             "output": { "path": output.display().to_string(), "status": if out_ok { "ok" } else { "MISMATCH" }, "sha256": out_sha, "expected": m.output.sha256 },
             "source": { "path": source_path.display().to_string(), "status": source_status, "sha256": source_sha, "expected": m.source.sha256 },
+            "scope": scope,
+            "source_checked": source_checked,
             "ok": all_ok,
         }))?;
     } else {
@@ -1773,6 +1840,14 @@ fn cmd_verify(
             );
         }
         println!("Source      {}  {}", source_path.display(), source_status);
+        println!(
+            "Scope       {scope}{}",
+            if require_source && !source_checked {
+                "  (source required: FAIL)"
+            } else {
+                ""
+            }
+        );
         if let Some(s) = &source_sha {
             println!("            sha256 {s}");
         }
@@ -1796,6 +1871,7 @@ fn cmd_verify(
                     from,
                     to,
                     matches,
+                    ..
                 } => println!(
                     "            time range {name} (column {column}) in [{from}, {to}) → {} matches",
                     group_thousands(*matches)
@@ -1847,10 +1923,10 @@ fn cmd_verify(
                 Operation::Search { query, matches } => println!(
                     "            search {:?}{}{}{} → {} matches",
                     query.pattern,
-                    if query.kind == PatternKind::Regex {
-                        " (regex)"
-                    } else {
-                        ""
+                    match query.kind {
+                        PatternKind::Regex => " (regex)",
+                        PatternKind::Exact => " (exact)",
+                        PatternKind::Literal => "",
                     },
                     if query.case_insensitive {
                         " (case-insensitive)"
@@ -1959,6 +2035,7 @@ struct FreqArgs {
     top: usize,
     search: Option<String>,
     regex: bool,
+    exact: bool,
     ignore_case: bool,
     invert: bool,
     threads: usize,
@@ -2036,11 +2113,7 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
             &idx,
             &SearchQuery {
                 pattern: pattern.clone(),
-                kind: if o.regex {
-                    PatternKind::Regex
-                } else {
-                    PatternKind::Literal
-                },
+                kind: pattern_kind(o.regex, o.exact),
                 case_insensitive: o.ignore_case,
                 columns: None,
                 invert: o.invert,
@@ -2105,7 +2178,7 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
             "elapsed_s": result.elapsed.as_secs_f64(),
             "throughput_mib_s": mib_per_s(shared.bytes.load(std::sync::atomic::Ordering::Relaxed), result.elapsed),
             "threads": result.threads,
-            "peak_rss_bytes": rss,
+            "peak_rss_bytes": rss_json(rss),
         }));
     }
     let width = result
@@ -2152,7 +2225,7 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
             result.elapsed
         ),
         result.threads,
-        human_bytes(rss)
+        rss_text(rss)
     );
     Ok(())
 }
@@ -2163,6 +2236,7 @@ struct TimelineArgs {
     max_buckets: usize,
     search: Option<String>,
     regex: bool,
+    exact: bool,
     ignore_case: bool,
     invert: bool,
     year: Option<i64>,
@@ -2224,11 +2298,7 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
             &idx,
             &SearchQuery {
                 pattern: pattern.clone(),
-                kind: if o.regex {
-                    PatternKind::Regex
-                } else {
-                    PatternKind::Literal
-                },
+                kind: pattern_kind(o.regex, o.exact),
                 case_insensitive: o.ignore_case,
                 columns: None,
                 invert: o.invert,

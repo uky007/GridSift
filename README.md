@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/uky007/GridSift/actions/workflows/ci.yml/badge.svg)](https://github.com/uky007/GridSift/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 
 An offline, evidence-safe workbench for investigating multi-gigabyte CSV
 security data — without loading it into RAM, uploading it anywhere, or
@@ -16,8 +16,12 @@ application for Linux, macOS and Windows.
 
 - **Evidence-safe** -- The source is opened read-only and never rewritten.
   Its SHA-256 is computed on open; every derived artefact is tied to it.
-- **Bounded memory** -- A sparse, quote-aware record index (a few KiB per
-  GiB) is all that is kept. A 10 GiB file is navigated with ~10 MiB of RSS.
+- **Bounded memory** -- The source is never loaded into memory: a sparse,
+  quote-aware record index (a few KiB per GiB) plus fixed read buffers is
+  all that navigation needs, so the index pass runs in the same ~35 MiB at
+  1 GiB and at 10 GiB. Match sets and lookup tables grow with the matches
+  and the tables, not with the file (details and conditions in
+  [bench/README.md](bench/README.md)).
 - **Strictly offline** -- No telemetry, no update checks, no DNS.
   Enrichment (GeoIP / ASN, domain classification, lookups) uses only local
   datasets the analyst imports, each identified by hash.
@@ -34,7 +38,7 @@ application for Linux, macOS and Windows.
 
 ## Quick install
 
-Rust 1.85 or newer. Not on crates.io yet — build from source:
+Rust 1.87 or newer. Not on crates.io yet — build from source:
 
 ```
 git clone https://github.com/uky007/GridSift.git
@@ -78,8 +82,9 @@ desktop walkthrough.
 - **Quote-aware sparse index** -- checkpoints carry parser state, so
   multi-line quoted fields are records, any record is one bounded read
   away, and scans run on all cores over disjoint ranges.
-- **Search** -- literal and regex, per column, case-insensitive, inverted;
-  2–13 GiB/s on a laptop; results are a compressed bitmap of records.
+- **Search** -- literal, regex or exact field value, per column,
+  case-insensitive, inverted; 2–13 GiB/s on a 10-core laptop with a warm
+  cache; results are a compressed bitmap of records.
 - **Selection lineage** -- a search within a search within a time range:
   each step is a chip with its count, revertable without rescanning, and
   exactly what the manifest records.
@@ -94,7 +99,12 @@ desktop walkthrough.
   mask / partial / ip-prefix / HMAC-pseudonymised columns; the policy (never
   the key) goes into the manifest.
 - **Provenance manifest** -- source identity, parser settings, every
-  operation, output digest ([docs/manifest.md](docs/manifest.md)).
+  operation, output digest; written before the output it describes and
+  checked by `gridsift verify` ([docs/manifest.md](docs/manifest.md)).
+- **Evidence protection by construction** -- every path the tool writes
+  (output, manifest, index sidecar, their temporaries) is checked against
+  the source first; a source that changes on disk after it was opened is
+  detected and blocks exports.
 - **Honest numbers** -- elapsed time, throughput and peak RSS on every
   command; approximate results say so.
 

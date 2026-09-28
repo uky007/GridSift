@@ -10,9 +10,9 @@ use eframe::egui;
 use gridsift_core::Source;
 use gridsift_core::dialect::sniff;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
-use gridsift_core::export::{ExportOptions, Selection, export};
+use gridsift_core::export::{ExportOptions, Selection, export_pending};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
-use gridsift_core::hash::hex;
+use gridsift_core::hash::{Digests, HashSelection, hash_source, hex};
 use gridsift_core::index::{IndexParams, SparseIndex, bootstrap};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
 use gridsift_core::reader::header_fields;
@@ -25,7 +25,7 @@ use gridsift_core::search::{
 use gridsift_core::semantic::{Profile, ProfileOptions, SemanticType, profile, profile_rows};
 use gridsift_core::sidecar::default_index_path;
 use gridsift_core::sys::{boost_current_thread, group_thousands, human_bytes};
-use gridsift_core::timeline::{TimelineOptions, select_time_range, timeline};
+use gridsift_core::timeline::{TimelineOptions, current_year, select_time_range, timeline};
 
 use crate::cache::RowCache;
 use crate::jobs::{
@@ -43,6 +43,8 @@ const PROBE_ROWS: usize = 1000;
 pub struct SearchUi {
     pub pattern: String,
     pub regex: bool,
+    /// Whole-field equality (what a value-count pivot uses).
+    pub exact: bool,
     pub ignore_case: bool,
     pub invert: bool,
     /// `None` = all columns.
@@ -54,14 +56,20 @@ pub struct SearchUi {
 }
 
 impl SearchUi {
+    pub fn kind(&self) -> PatternKind {
+        if self.exact {
+            PatternKind::Exact
+        } else if self.regex {
+            PatternKind::Regex
+        } else {
+            PatternKind::Literal
+        }
+    }
+
     pub fn query(&self) -> SearchQuery {
         SearchQuery {
             pattern: self.pattern.clone(),
-            kind: if self.regex {
-                PatternKind::Regex
-            } else {
-                PatternKind::Literal
-            },
+            kind: self.kind(),
             case_insensitive: self.ignore_case,
             columns: self.column.map(|c| vec![c]),
             invert: self.invert,
@@ -205,6 +213,9 @@ pub struct EnrichUi {
     pub values: String,
     pub rules: Vec<EnrichRule>,
     pub error: Option<String>,
+    /// A dataset being opened on a worker thread (an MMDB or a lookup CSV
+    /// can be large; the UI thread never reads it).
+    pub loading: Option<JoinHandle<Result<EnrichRule, String>>>,
 }
 
 impl Default for EnrichUi {
@@ -218,45 +229,101 @@ impl Default for EnrichUi {
             values: String::new(),
             rules: Vec::new(),
             error: None,
+            loading: None,
         }
     }
 }
 
-/// Build the rule described by the dialog's "add" section (loads the
-/// dataset, which fingerprints it).
-pub fn build_enrich_rule(ui: &EnrichUi, header: &[String]) -> Result<EnrichRule, String> {
-    let name = header
-        .get(ui.column)
-        .cloned()
-        .unwrap_or_else(|| format!("col{}", ui.column));
-    let provider = match ui.choice {
-        ProviderChoice::Domain => Provider::Domain,
-        ProviderChoice::GeoIp => {
-            let p = ui.path.as_ref().ok_or("choose an .mmdb file")?;
-            let db: Arc<dyn GeoProvider> = Arc::new(GeoIpDb::open(p).map_err(|e| e.to_string())?);
-            Provider::GeoIp(db)
-        }
-        ProviderChoice::Lookup => {
-            let p = ui.path.as_ref().ok_or("choose a CSV file")?;
-            let key = ui.key.trim();
-            if key.is_empty() {
-                return Err("the key column is required".into());
-            }
-            let values: Vec<String> = ui
+impl EnrichUi {
+    /// Snapshot of the "add" section, owned so it can be built off-thread.
+    pub fn spec(&self, header: &[String]) -> RuleSpec {
+        RuleSpec {
+            column: self.column,
+            name: header
+                .get(self.column)
+                .cloned()
+                .unwrap_or_else(|| format!("col{}", self.column)),
+            choice: self.choice,
+            path: self.path.clone(),
+            key: self.key.trim().to_string(),
+            values: self
                 .values
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .collect();
-            let t = LookupTable::load(p, key, &values).map_err(|e| e.to_string())?;
-            Provider::Lookup(Arc::new(t))
+                .collect(),
         }
-    };
-    Ok(EnrichRule {
-        column: ui.column,
-        name,
-        provider,
-    })
+    }
+
+    /// Start building the rule on a worker thread.
+    pub fn start_loading(&mut self, header: &[String]) {
+        if self.loading.is_some() {
+            return;
+        }
+        self.error = None;
+        let spec = self.spec(header);
+        let handle = std::thread::Builder::new()
+            .name("gridsift-enrich-load".into())
+            .spawn(move || spec.build())
+            .expect("spawn enrich thread");
+        self.loading = Some(handle);
+    }
+
+    /// Collect a finished load into the rule list.
+    pub fn poll_loading(&mut self) {
+        if !self.loading.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        if let Some(h) = self.loading.take() {
+            match h.join() {
+                Ok(Ok(rule)) => {
+                    self.rules.push(rule);
+                    self.error = None;
+                }
+                Ok(Err(e)) => self.error = Some(e),
+                Err(_) => self.error = Some("loading the dataset panicked".into()),
+            }
+        }
+    }
+}
+
+/// Everything needed to build one enrichment rule.
+#[derive(Clone, Debug)]
+pub struct RuleSpec {
+    pub column: usize,
+    pub name: String,
+    pub choice: ProviderChoice,
+    pub path: Option<PathBuf>,
+    pub key: String,
+    pub values: Vec<String>,
+}
+
+impl RuleSpec {
+    /// Open the dataset (which fingerprints it) and build the rule.
+    pub fn build(self) -> Result<EnrichRule, String> {
+        let provider = match self.choice {
+            ProviderChoice::Domain => Provider::Domain,
+            ProviderChoice::GeoIp => {
+                let p = self.path.as_ref().ok_or("choose an .mmdb file")?;
+                let db: Arc<dyn GeoProvider> =
+                    Arc::new(GeoIpDb::open(p).map_err(|e| e.to_string())?);
+                Provider::GeoIp(db)
+            }
+            ProviderChoice::Lookup => {
+                let p = self.path.as_ref().ok_or("choose a CSV file")?;
+                if self.key.is_empty() {
+                    return Err("the key column is required".into());
+                }
+                let t = LookupTable::load(p, &self.key, &self.values).map_err(|e| e.to_string())?;
+                Provider::Lookup(Arc::new(t))
+            }
+        };
+        Ok(EnrichRule {
+            column: self.column,
+            name: self.name,
+            provider,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +381,19 @@ pub struct Document {
     pub index_from_sidecar: bool,
     pub sidecar: Option<PathBuf>,
     pub status: Option<String>,
+
+    /// A cached index without a digest gets one from this pass.
+    pub digest_job: Option<DigestJob>,
+    /// The source's size or mtime changed after it was opened: the index,
+    /// digest and every selection are stale. Set by [`Document::poll_all`].
+    pub source_changed: bool,
+    last_source_check: Instant,
+}
+
+/// Hash-only pass for a sidecar that was built without a digest.
+pub struct DigestJob {
+    pub cancel: Arc<AtomicBool>,
+    pub handle: Option<JoinHandle<std::io::Result<Option<Digests>>>>,
 }
 
 impl Document {
@@ -322,25 +402,28 @@ impl Document {
         let source = Arc::new(Source::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
         let head = source.slice(0, 1 << 20);
         let sn = sniff(head, source.len());
-        let mut params = IndexParams {
+        let params = IndexParams {
             dialect: sn.dialect,
             scan_start: sn.scan_start,
             ..IndexParams::default()
         };
 
-        // A complete, matching sidecar means no build is needed at all.
-        let sidecar = default_index_path(path).ok();
+        // A complete sidecar for this file *and* this dialect means no
+        // build is needed; a missing digest is computed separately below.
+        let sidecar = default_index_path(path, params.dialect).ok();
         let cached = sidecar
             .as_ref()
             .and_then(|p| SparseIndex::load(p).ok())
-            .filter(|i| i.matches_source(source.id()) && i.stats.complete);
+            .filter(|i| {
+                i.matches_source(source.id())
+                    && i.stats.complete
+                    && i.params.dialect == params.dialect
+            });
         let (index, from_sidecar) = match cached {
-            Some(i) => {
-                params = i.params;
-                (i, true)
-            }
+            Some(i) => (i, true),
             None => (bootstrap(&source, params), false),
         };
+        let needs_digest = from_sidecar && index.digests.sha256.is_none();
         let header: Vec<String> = match header_fields(&source, &index) {
             Some(h) => h
                 .iter()
@@ -374,6 +457,23 @@ impl Document {
         let index = Arc::new(RwLock::new(index));
         let build = (!from_sidecar)
             .then(|| BuildJob::spawn(ctx.clone(), source.clone(), params, index.clone()));
+        let digest_job = needs_digest.then(|| {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (s, c, ctx2) = (source.clone(), cancel.clone(), ctx.clone());
+            let handle = std::thread::Builder::new()
+                .name("gridsift-digest".into())
+                .spawn(move || {
+                    boost_current_thread();
+                    let r = hash_source(&s, HashSelection::SHA256, 8 << 20, Some(&c));
+                    ctx2.request_repaint();
+                    r
+                })
+                .expect("spawn digest thread");
+            DigestJob {
+                cancel,
+                handle: Some(handle),
+            }
+        });
         Ok(Document {
             path: path.to_path_buf(),
             source,
@@ -408,6 +508,9 @@ impl Document {
             index_from_sidecar: from_sidecar,
             sidecar,
             status: None,
+            digest_job,
+            source_changed: false,
+            last_source_check: Instant::now(),
         })
     }
 
@@ -452,6 +555,7 @@ impl Document {
             || self.timeline_job.is_some()
             || self.export.is_some()
             || self.profile_job.is_some()
+            || self.digest_job.is_some()
     }
 
     pub fn index_complete(&self) -> bool {
@@ -460,10 +564,64 @@ impl Document {
             .is_ok_and(|i| i.stats.complete && i.digests.sha256.is_some())
     }
 
+    /// Every step of the current selection finished normally (or there is
+    /// no selection being applied).
+    pub fn selection_complete(&self) -> bool {
+        self.scan_base().is_none_or(|s| s.lineage_complete())
+    }
+
+    /// Why an export is not possible right now (for the disabled button).
+    pub fn export_blocker(&self) -> Option<&'static str> {
+        if self.source_changed {
+            Some("the source file changed since it was opened; reopen it")
+        } else if !self.index_complete() {
+            Some("available once indexing (and the SHA-256) has finished")
+        } else if self.export.is_some() {
+            Some("an export is already running")
+        } else if self.selection_running() {
+            Some("the current scan is still running")
+        } else if !self.selection_complete() {
+            Some("a step of the selection was cancelled or failed; remove it first")
+        } else {
+            None
+        }
+    }
+
+    /// Refuse to start a scan when the file on disk is no longer what was
+    /// opened (index offsets and digest would be meaningless).
+    fn guard_source(&mut self) -> bool {
+        self.check_source(true);
+        if self.source_changed {
+            self.status = Some("the source file changed since it was opened; reopen it".into());
+        }
+        !self.source_changed
+    }
+
+    /// Metadata check of the source (size and mtime); every two seconds
+    /// from the UI, or on demand before a scan.
+    fn check_source(&mut self, force: bool) {
+        if self.source_changed
+            || (!force && self.last_source_check.elapsed() < Duration::from_secs(2))
+        {
+            return;
+        }
+        self.last_source_check = Instant::now();
+        if !self.source.verify_unchanged().unwrap_or(false) {
+            self.source_changed = true;
+            self.cancel_all();
+            self.status = Some(
+                "SOURCE CHANGED on disk: the index, digest and selection are stale — reopen the file"
+                    .into(),
+            );
+        }
+    }
+
     // -- polling -----------------------------------------------------------
 
     pub fn poll_all(&mut self) {
+        self.check_source(false);
         self.poll_build();
+        self.poll_digest();
         self.poll_profile();
         if let Some(s) = &self.selection {
             s.poll();
@@ -471,6 +629,33 @@ impl Document {
         self.poll_freq();
         self.poll_timeline();
         self.poll_export();
+    }
+
+    fn poll_digest(&mut self) {
+        let Some(job) = &mut self.digest_job else {
+            return;
+        };
+        if !job.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        let handle = job.handle.take().expect("handle present until joined");
+        self.digest_job = None;
+        match handle.join() {
+            Ok(Ok(Some(d))) => {
+                let saved = self.index.write().ok().map(|mut w| {
+                    w.digests = d;
+                    w.clone()
+                });
+                if let (Some(idx), Some(p)) = (saved, &self.sidecar) {
+                    if let Err(e) = idx.save_for(&self.source, p) {
+                        self.status = Some(format!("index not saved: {e}"));
+                    }
+                }
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => self.status = Some(format!("hashing failed: {e}")),
+            Err(_) => self.status = Some("hash thread panicked".into()),
+        }
     }
 
     fn poll_build(&mut self) {
@@ -491,7 +676,7 @@ impl Document {
                 if complete {
                     self.spawn_profile(idx.clone());
                     if let Some(p) = &self.sidecar {
-                        if let Err(e) = idx.save(p) {
+                        if let Err(e) = idx.save_for(&self.source, p) {
                             self.status = Some(format!("index not saved: {e}"));
                         }
                     }
@@ -540,12 +725,13 @@ impl Document {
     }
 
     /// The finished step a new selection step nests in. A step that is
-    /// still running is cancelled and replaced by the new one; its
-    /// ancestors are always finished, so the base can be snapshotted now.
-    fn nesting_parent(&mut self) -> (Option<MatchSet>, Option<Arc<SelectionNode>>) {
+    /// still running is cancelled and replaced by the new one. A parent
+    /// that was cancelled or failed holds a partial match set, so nesting
+    /// in it is refused (`Err` carries the message for the status bar).
+    fn nesting_parent(&mut self) -> Result<(Option<MatchSet>, Option<Arc<SelectionNode>>), String> {
         let Some(s) = self.scan_base() else {
             self.cancel_running_selection();
-            return (None, None);
+            return Ok((None, None));
         };
         let parent = if s.running() {
             s.cancel.store(true, Ordering::Relaxed);
@@ -553,8 +739,16 @@ impl Document {
         } else {
             Some(s)
         };
+        if let Some(p) = &parent {
+            if !p.lineage_complete() {
+                return Err(
+                    "the current selection has a cancelled or failed step; remove it (×) before searching within it"
+                        .into(),
+                );
+            }
+        }
         let base = parent.as_ref().map(|p| p.matches());
-        (base, parent)
+        Ok((base, parent))
     }
 
     pub fn selection_running(&self) -> bool {
@@ -584,10 +778,19 @@ impl Document {
                 return;
             }
         };
+        if !self.guard_source() {
+            return;
+        }
         let Some(index) = self.index_snapshot() else {
             return;
         };
-        let (base, parent) = self.nesting_parent();
+        let (base, parent) = match self.nesting_parent() {
+            Ok(x) => x,
+            Err(e) => {
+                self.status = Some(e);
+                return;
+            }
+        };
         let shared = Arc::new(SearchShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (source, s2, c2, ctx2) = (
@@ -626,10 +829,20 @@ impl Document {
     /// Select the records whose `column` timestamp is in `from..to`, within
     /// the current selection when filtering.
     pub fn start_time_range(&mut self, ctx: &egui::Context, column: usize, from: i64, to: i64) {
+        if !self.guard_source() {
+            return;
+        }
         let Some(index) = self.index_snapshot() else {
             return;
         };
-        let (base, parent) = self.nesting_parent();
+        let (base, parent) = match self.nesting_parent() {
+            Ok(x) => x,
+            Err(e) => {
+                self.status = Some(e);
+                return;
+            }
+        };
+        let reference_year = current_year();
         let shared = Arc::new(SearchShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (source, s2, c2, ctx2) = (
@@ -643,6 +856,7 @@ impl Document {
             .spawn(move || {
                 let opts = TimelineOptions {
                     column,
+                    reference_year,
                     cancel: Some(&c2),
                     ..TimelineOptions::default()
                 };
@@ -668,6 +882,7 @@ impl Document {
             name: self.column_name(column),
             from,
             to,
+            reference_year,
         };
         self.selection = Some(SelectionNode::new(parent, op, shared, cancel, handle));
         self.search_ui.show_only = true;
@@ -705,6 +920,9 @@ impl Document {
         if let Some(j) = &self.freq_job {
             j.cancel.store(true, Ordering::Relaxed);
         }
+        if !self.guard_source() {
+            return;
+        }
         let Some(index) = self.index_snapshot() else {
             return;
         };
@@ -721,11 +939,17 @@ impl Document {
         let handle = std::thread::Builder::new()
             .name("gridsift-freq".into())
             .spawn(move || {
-                // nest in the selection once its scan has finished
-                let matches = b2.map(|n| {
+                // nest in the selection once its scan has finished — and
+                // only if it finished properly
+                let matches = b2.as_ref().map(|n| {
                     n.wait();
                     n.matches()
                 });
+                if b2.as_ref().is_some_and(|n| !n.lineage_complete()) {
+                    return Err(std::io::Error::other(
+                        "the selection has a cancelled or failed step",
+                    ));
+                }
                 let selection = match &matches {
                     Some(m) => Selection::Matches(m),
                     None => Selection::All,
@@ -795,6 +1019,9 @@ impl Document {
         if let Some(j) = &self.timeline_job {
             j.cancel.store(true, Ordering::Relaxed);
         }
+        if !self.guard_source() {
+            return;
+        }
         let Some(index) = self.index_snapshot() else {
             return;
         };
@@ -810,10 +1037,15 @@ impl Document {
         let handle = std::thread::Builder::new()
             .name("gridsift-timeline".into())
             .spawn(move || {
-                let matches = b2.map(|n| {
+                let matches = b2.as_ref().map(|n| {
                     n.wait();
                     n.matches()
                 });
+                if b2.as_ref().is_some_and(|n| !n.lineage_complete()) {
+                    return Err(std::io::Error::other(
+                        "the selection has a cancelled or failed step",
+                    ));
+                }
                 let selection = match &matches {
                     Some(m) => Selection::Matches(m),
                     None => Selection::All,
@@ -893,18 +1125,24 @@ impl Document {
         hmac_key: Option<Vec<u8>>,
         include_derived: bool,
     ) {
-        let index = match self.index.read() {
-            Ok(i) if i.stats.complete && i.digests.sha256.is_some() => i.clone(),
-            _ => {
-                self.status = Some("export needs the finished index (wait for indexing)".into());
-                return;
-            }
-        };
-        let node = self.scan_base();
-        if node.as_ref().is_some_and(|n| n.running()) {
-            self.status = Some("export waits for the running scan to finish".into());
+        self.check_source(true);
+        if let Some(why) = self.export_blocker() {
+            self.status = Some(format!("export not started: {why}"));
             return;
         }
+        let Some(index) = self.index_snapshot() else {
+            return;
+        };
+        // the whole output plan is checked against the evidence before
+        // anything is written: the CSV, the manifest and both temporaries
+        let mpath = Manifest::path_for(&out);
+        for p in [&out, &mpath, &Manifest::temp_path(&mpath)] {
+            if let Err(e) = self.source.guard_not_source(p) {
+                self.status = Some(format!("export not started: {e}"));
+                return;
+            }
+        }
+        let node = self.scan_base();
         let matches = node.as_ref().map(|n| n.matches());
         let operations: Vec<Operation> = node.as_ref().map(|n| n.ops()).unwrap_or_default();
         let expected = matches.as_ref().map_or(index.stats.records, |m| m.len());
@@ -953,14 +1191,19 @@ impl Document {
                     cancel: Some(&c2),
                     ..ExportOptions::default()
                 };
-                let rep = export(&source, &index, selection, opts, &out2, &mut |n, _| {
-                    r2.store(n, Ordering::Relaxed)
-                })
-                .map_err(|e| e.to_string())?;
+                let pending =
+                    export_pending(&source, &index, selection, opts, &out2, &mut |n, _| {
+                        r2.store(n, Ordering::Relaxed)
+                    })
+                    .map_err(|e| e.to_string())?;
+                let rep = pending.report().clone();
                 if !rep.complete {
-                    return Ok((rep, PathBuf::new()));
+                    return Ok((
+                        pending.commit(None).map_err(|e| e.to_string())?,
+                        PathBuf::new(),
+                    ));
                 }
-                let out_path = std::fs::canonicalize(&out2).unwrap_or_else(|_| out2.clone());
+                let out_path = std::path::absolute(&out2).unwrap_or_else(|_| out2.clone());
                 let manifest = Manifest::new(
                     SourceInfo::from_source(
                         &source,
@@ -995,8 +1238,11 @@ impl Document {
                         blake3: rep.digests.blake3.map(|d| hex(&d)),
                     },
                 );
-                let mpath = Manifest::path_for(&out2);
-                manifest.write(&mpath).map_err(|e| e.to_string())?;
+                // manifest first, then the CSV: a failure between the two
+                // leaves a manifest whose digest `verify` will not match,
+                // never a CSV without provenance
+                let rep = pending.commit(Some(&manifest)).map_err(|e| e.to_string())?;
+                let mpath = rep.manifest.clone().unwrap_or_default();
                 Ok((rep, mpath))
             })
             .expect("spawn export thread");
@@ -1047,6 +1293,7 @@ impl Document {
             self.export.as_ref().map(|j| j.cancel.clone()),
             self.freq_job.as_ref().map(|j| j.cancel.clone()),
             self.timeline_job.as_ref().map(|j| j.cancel.clone()),
+            self.digest_job.as_ref().map(|j| j.cancel.clone()),
         ]
         .into_iter()
         .flatten()

@@ -211,10 +211,13 @@ fn apply_to_document(ctx: &egui::Context, d: &mut Document, action: Action) {
         Action::RevertTo(node) => d.revert_to(node),
         Action::PopSelection => d.pop_selection(),
         Action::ClearSelection => d.clear_selection(),
+        // a value from the counts table selects exactly that value, so the
+        // click yields the count that was shown
         Action::Pivot(column, value) => {
             d.search_ui.pattern = value;
             d.search_ui.column = Some(column);
             d.search_ui.regex = false;
+            d.search_ui.exact = true;
             d.search_ui.ignore_case = false;
             d.search_ui.invert = false;
             d.search_ui.show_only = true;

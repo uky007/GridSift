@@ -125,6 +125,8 @@ pub enum SelectionOp {
         name: String,
         from: i64,
         to: i64,
+        /// Year assumed for timestamps that carry none (syslog).
+        reference_year: i64,
     },
 }
 
@@ -141,6 +143,7 @@ impl SelectionOp {
                 let pat = match q.kind {
                     PatternKind::Regex => format!("/{}/", q.pattern),
                     PatternKind::Literal => format!("{:?}", q.pattern),
+                    PatternKind::Exact => format!("= {:?}", q.pattern),
                 };
                 let mut s = pat;
                 if q.case_insensitive {
@@ -174,13 +177,35 @@ impl SelectionOp {
                 name,
                 from,
                 to,
+                reference_year,
             } => Operation::TimeRange {
                 column: *column,
                 name: name.clone(),
                 from: iso8601_utc((*from).max(0) as u64),
                 to: iso8601_utc((*to).max(0) as u64),
                 matches,
+                reference_year: Some(*reference_year),
             },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SelectionState {
+    Running,
+    Complete,
+    Cancelled,
+    Failed(String),
+}
+
+impl SelectionState {
+    /// Short label for a chip; empty when complete.
+    pub fn label(&self) -> &str {
+        match self {
+            SelectionState::Running => "…",
+            SelectionState::Complete => "",
+            SelectionState::Cancelled => "(cancelled)",
+            SelectionState::Failed(_) => "(failed)",
         }
     }
 }
@@ -236,6 +261,33 @@ impl SelectionNode {
 
     pub fn outcome(&self) -> Option<SearchOutcome> {
         self.outcome.lock().ok().and_then(|o| o.clone())
+    }
+
+    /// Where this step stands. Only `Complete` steps may be exported,
+    /// counted, charted or nested in: a cancelled or failed scan holds a
+    /// partial match set that must not pass for the real answer.
+    pub fn state(&self) -> SelectionState {
+        if self.running() {
+            return SelectionState::Running;
+        }
+        match self.outcome() {
+            Some(o) if o.complete => SelectionState::Complete,
+            Some(o) => match o.error {
+                Some(e) => SelectionState::Failed(e),
+                None => SelectionState::Cancelled,
+            },
+            // the worker thread panicked
+            None => SelectionState::Failed("scan thread ended without a result".into()),
+        }
+    }
+
+    pub fn complete(&self) -> bool {
+        matches!(self.state(), SelectionState::Complete)
+    }
+
+    /// `true` when this step and every ancestor completed.
+    pub fn lineage_complete(self: &Arc<Self>) -> bool {
+        self.lineage().iter().all(|n| n.complete())
     }
 
     /// Block until the scan has finished (worker threads only, never the
@@ -404,4 +456,61 @@ pub struct ExportJob {
     pub expected: u64,
     pub cancel: Arc<AtomicBool>,
     pub out: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gridsift_core::search::SearchQuery;
+
+    fn node(parent: Option<Arc<SelectionNode>>, outcome: SearchOutcome) -> Arc<SelectionNode> {
+        let shared = Arc::new(SearchShared::new(1));
+        let handle = std::thread::spawn(move || outcome);
+        SelectionNode::new(
+            parent,
+            SelectionOp::Search(SearchQuery::literal("x")),
+            shared,
+            Arc::new(AtomicBool::new(false)),
+            handle,
+        )
+    }
+
+    fn outcome(complete: bool, error: Option<&str>) -> SearchOutcome {
+        SearchOutcome {
+            complete,
+            records_scanned: 0,
+            bytes_scanned: 0,
+            elapsed: Duration::ZERO,
+            ranges: 0,
+            threads: 1,
+            error: error.map(String::from),
+        }
+    }
+
+    /// A cancelled or failed step is never "complete", and neither is any
+    /// step nested under it — that is what gates export, counts and
+    /// further filtering.
+    #[test]
+    fn selection_state_follows_the_outcome_through_the_lineage() {
+        let ok = node(None, outcome(true, None));
+        ok.wait();
+        assert_eq!(ok.state(), SelectionState::Complete);
+        assert!(ok.lineage_complete());
+
+        let cancelled = node(Some(ok.clone()), outcome(false, None));
+        cancelled.wait();
+        assert_eq!(cancelled.state(), SelectionState::Cancelled);
+        assert!(!cancelled.lineage_complete());
+        assert_eq!(cancelled.state().label(), "(cancelled)");
+
+        let child_of_cancelled = node(Some(cancelled.clone()), outcome(true, None));
+        child_of_cancelled.wait();
+        assert!(child_of_cancelled.complete());
+        assert!(!child_of_cancelled.lineage_complete());
+
+        let failed = node(Some(ok), outcome(false, Some("disk")));
+        failed.wait();
+        assert_eq!(failed.state(), SelectionState::Failed("disk".into()));
+        assert!(failed.status_line().contains("read error"));
+    }
 }

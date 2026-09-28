@@ -31,8 +31,15 @@ use crate::source::Source;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PatternKind {
+    /// Substring of the record (or of a chosen column's value).
     Literal,
+    /// Regular expression over the record (or a column's value).
     Regex,
+    /// A whole field equal to the pattern: `10.0.0.1` does not select
+    /// `10.0.0.10`. With `columns` unset, any field may match. The pattern
+    /// may be empty to select empty fields. This is what a value-count
+    /// pivot uses.
+    Exact,
 }
 
 /// A search request. Serialisable so it can be recorded verbatim in a
@@ -67,9 +74,18 @@ impl SearchQuery {
         }
     }
 
+    /// Whole-field equality in `column`.
+    pub fn exact(pattern: impl Into<String>, column: Option<usize>) -> SearchQuery {
+        SearchQuery {
+            kind: PatternKind::Exact,
+            columns: column.map(|c| vec![c]),
+            ..SearchQuery::literal(pattern)
+        }
+    }
+
     /// Compile for a given dialect. Regex syntax errors are reported as text.
     pub fn compile(&self, dialect: Dialect) -> Result<Compiled, String> {
-        if self.pattern.is_empty() {
+        if self.pattern.is_empty() && self.kind != PatternKind::Exact {
             return Err("empty pattern".into());
         }
         let matcher = match (self.kind, self.case_insensitive) {
@@ -88,23 +104,40 @@ impl SearchQuery {
                     .build()
                     .map_err(|e| e.to_string())?,
             ),
+            (PatternKind::Exact, false) => Matcher::Exact {
+                needle: self.pattern.as_bytes().to_vec(),
+                finder: (!self.pattern.is_empty())
+                    .then(|| Box::new(memmem::Finder::new(self.pattern.as_bytes()).into_owned())),
+            },
+            (PatternKind::Exact, true) => Matcher::Regex(
+                regex::bytes::RegexBuilder::new(&format!("^{}$", regex::escape(&self.pattern)))
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| e.to_string())?,
+            ),
         };
         // Slice-level scanning is only a valid shortcut when "some field
         // matches" implies "the raw bytes match somewhere":
         // - anchors refer to the haystack, so an anchored regex must see one
         //   record (or field) at a time;
         // - a column-restricted regex must see the unescaped field;
-        // - a literal containing the quote byte can straddle a `""` escape.
+        // - a literal containing the quote byte can straddle a `""` escape;
+        // - an exact match is verified per record anyway (a hit is only a
+        //   candidate), and without a column every field must be split.
         let quote = dialect
             .quote
             .is_some_and(|q| self.pattern.as_bytes().contains(&q));
         let per_record = match self.kind {
             PatternKind::Regex => self.columns.is_some() || has_anchor(&self.pattern),
             PatternKind::Literal => self.columns.is_some() && quote,
+            PatternKind::Exact => {
+                self.columns.is_none() || quote || self.pattern.is_empty() || self.case_insensitive
+            }
         };
         Ok(Compiled {
             matcher,
             columns: self.columns.clone(),
+            any_field: self.kind == PatternKind::Exact && self.columns.is_none(),
             invert: self.invert,
             per_record,
             dialect,
@@ -122,10 +155,17 @@ fn has_anchor(pattern: &str) -> bool {
 enum Matcher {
     Literal(Box<memmem::Finder<'static>>),
     Regex(regex::bytes::Regex),
+    /// Whole-field equality; `finder` locates candidates in raw slices.
+    Exact {
+        needle: Vec<u8>,
+        finder: Option<Box<memmem::Finder<'static>>>,
+    },
 }
 
 impl Matcher {
-    /// First match starting at or after `from`, as `(start, end)`.
+    /// First match starting at or after `from`, as `(start, end)`. For
+    /// `Exact` this is a candidate that still needs [`Matcher::is_match`]
+    /// on the field.
     #[inline]
     fn find(&self, hay: &[u8], from: usize) -> Option<(usize, usize)> {
         match self {
@@ -133,6 +173,12 @@ impl Matcher {
                 .find(&hay[from..])
                 .map(|p| (from + p, from + p + f.needle().len())),
             Matcher::Regex(r) => r.find_at(hay, from).map(|m| (m.start(), m.end())),
+            Matcher::Exact {
+                finder: Some(f), ..
+            } => f
+                .find(&hay[from..])
+                .map(|p| (from + p, from + p + f.needle().len())),
+            Matcher::Exact { finder: None, .. } => None,
         }
     }
 
@@ -141,6 +187,7 @@ impl Matcher {
         match self {
             Matcher::Literal(f) => f.find(hay).is_some(),
             Matcher::Regex(r) => r.is_match(hay),
+            Matcher::Exact { needle, .. } => hay == needle.as_slice(),
         }
     }
 }
@@ -149,6 +196,8 @@ impl Matcher {
 pub struct Compiled {
     matcher: Matcher,
     columns: Option<Vec<usize>>,
+    /// Exact match against every field (no column given).
+    any_field: bool,
     invert: bool,
     per_record: bool,
     dialect: Dialect,
@@ -159,6 +208,10 @@ impl Compiled {
     /// is *not* applied here.
     pub fn record_matches<'a>(&self, raw: &'a [u8], fields: &mut Vec<Cow<'a, [u8]>>) -> bool {
         match &self.columns {
+            None if self.any_field => {
+                split_fields(raw, self.dialect.delimiter, self.dialect.quote, fields);
+                fields.iter().any(|f| self.matcher.is_match(f))
+            }
             None => self.matcher.is_match(raw),
             Some(cols) => {
                 split_fields(raw, self.dialect.delimiter, self.dialect.quote, fields);
@@ -760,6 +813,58 @@ mod tests {
         assert_eq!(m.prev_before(11), Some(10));
         assert_eq!(m.prev_before(u64::MAX), Some(500_000_000_000));
         assert_eq!((m.first(), m.last()), (Some(3), Some(500_000_000_000)));
+    }
+
+    #[test]
+    fn exact_matches_whole_fields_only() {
+        // 10.0.0.1 must not select 10.0.0.10 / 10.0.0.100; embedded quotes
+        // and empty values are fields like any other.
+        let data = b"ip,host\n10.0.0.1,a\n10.0.0.10,b\n10.0.0.100,c\n\"10.0.0.1\",d\n,e\n\"say \"\"hi\"\"\",f\n";
+        let (src, idx) = fixture(data, 2);
+        let cases: Vec<(SearchQuery, Vec<u64>)> = vec![
+            (SearchQuery::exact("10.0.0.1", Some(0)), vec![0, 3]),
+            (SearchQuery::exact("10.0.0.1", None), vec![0, 3]),
+            (SearchQuery::literal("10.0.0.1"), vec![0, 1, 2, 3]),
+            (SearchQuery::exact("", Some(0)), vec![4]),
+            (SearchQuery::exact("say \"hi\"", Some(0)), vec![5]),
+            (SearchQuery::exact("b", None), vec![1]),
+            (
+                SearchQuery {
+                    case_insensitive: true,
+                    ..SearchQuery::exact("B", Some(1))
+                },
+                vec![1],
+            ),
+            (
+                SearchQuery {
+                    invert: true,
+                    ..SearchQuery::exact("10.0.0.1", Some(0))
+                },
+                vec![1, 2, 4, 5],
+            ),
+        ];
+        for (q, want) in cases {
+            for threads in [1, 3] {
+                let (m, out) = run(
+                    &src,
+                    &idx,
+                    &q,
+                    SearchOptions {
+                        threads,
+                        range_bytes: 16,
+                        ..SearchOptions::default()
+                    },
+                );
+                assert!(out.complete);
+                assert_eq!(m, want, "{q:?} with {threads} threads");
+                assert_eq!(m, reference(&src, &idx, &q), "{q:?} vs reference");
+            }
+        }
+        // the manifest spelling
+        assert_eq!(
+            serde_json::to_string(&PatternKind::Exact).unwrap(),
+            "\"exact\""
+        );
     }
 
     #[test]

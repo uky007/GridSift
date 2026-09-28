@@ -5,7 +5,7 @@ use gridsift_core::enrich::Provider;
 use gridsift_core::redact::{RedactMethod, Redactor};
 use gridsift_core::sys::group_thousands;
 
-use crate::document::{Document, ProviderChoice, RuleChoice, build_enrich_rule};
+use crate::document::{Document, ProviderChoice, RuleChoice};
 use crate::theme::{AMBER, DIM, GREEN, RED};
 
 /// The export dialog: what will be written, how it is redacted, then the
@@ -312,15 +312,31 @@ pub fn enrich_window(ctx: &egui::Context, d: &mut Document) {
                     });
                 }
             }
-            if ui.button("Add rule").clicked() {
-                add = true;
-            }
+            let loading = d.enrich_ui.loading.is_some();
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!loading, egui::Button::new("Add rule"))
+                    .clicked()
+                {
+                    add = true;
+                }
+                if loading {
+                    ui.spinner();
+                    ui.label(RichText::new("opening the dataset…").color(DIM));
+                }
+            });
             if let Some(e) = &d.enrich_ui.error {
                 ui.colored_label(RED, e);
             }
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button(RichText::new("Apply").color(AMBER)).clicked() {
+                if ui
+                    .add_enabled(
+                        !loading,
+                        egui::Button::new(RichText::new("Apply").color(AMBER)),
+                    )
+                    .clicked()
+                {
                     apply = true;
                 }
                 if ui.button("Close").clicked() {
@@ -332,13 +348,12 @@ pub fn enrich_window(ctx: &egui::Context, d: &mut Document) {
         d.enrich_ui.rules.remove(i);
     }
     if add {
-        match build_enrich_rule(&d.enrich_ui, &d.header) {
-            Ok(r) => {
-                d.enrich_ui.rules.push(r);
-                d.enrich_ui.error = None;
-            }
-            Err(e) => d.enrich_ui.error = Some(e),
-        }
+        let header = d.header.clone();
+        d.enrich_ui.start_loading(&header);
+    }
+    d.enrich_ui.poll_loading();
+    if d.enrich_ui.loading.is_some() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
     if apply {
         d.apply_enrichment();

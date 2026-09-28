@@ -44,7 +44,8 @@ and *no network*.
 | approach | what breaks |
 |---|---|
 | Spreadsheets (Excel, LibreOffice Calc) | 1,048,576-row limit; a 30-day proxy log is 50× that. Opening a subset means someone already cut the evidence with another tool |
-| Text editors and log viewers (EmEditor, klogg, …) | handle the size, but are line-oriented: a quoted field with an embedded newline is two "lines"; searching is possible, pivoting (top values, a time histogram, "only the rows of this host") is not; the most capable, EmEditor, is Windows-only and proprietary |
+| Log viewers (klogg, glogg, lnav, …) | handle the size, but are line-oriented: a quoted field with an embedded newline is two "lines"; regex search is possible, pivoting (top values, a time histogram, "only the rows of this host") is not |
+| Large-file text editors with a CSV mode (EmEditor) | handle the size and the CSV structure — EmEditor's CSV mode understands newlines inside cells and has filter, sort and pivot tables — but it is a Windows-only, proprietary *editor*: the file is something to change, and nothing records what was derived from it |
 | Command-line CSV tools (qsv, xsv, xan, Miller, csvkit) | fast and correct on huge files, and gridsift borrows from them — but the loop of *look → refine → look* becomes a sequence of commands whose intermediate files are copies of evidence with no provenance |
 | Loading into a database or a notebook (DuckDB, SQLite, pandas) | powerful, but it converts the evidence into another form; the link between a result and the original bytes is the analyst's memory. Notebooks are also not something most responders keep on an engagement laptop |
 | Ingesting into a SIEM or a search stack (Splunk, Elastic, Timesketch) | the right tool if the infrastructure exists; for a one-off export it means a server, an index build measured in hours, a licence or ingest cap, and a copy of the evidence living on that server |
@@ -78,10 +79,11 @@ the analyst's shell history; reproducing it later means redoing it.
 
 A typical engagement, end to end:
 
-1. *Open the export.* A 40 GB proxy log opens in milliseconds; rows are on
-   screen while the index and the SHA-256 are computed in the background.
-   The window says what it is looking at: size, record count, digest,
-   parser settings, malformed-row counts.
+1. *Open the export.* The proxy log — 40 GB, say; the largest file measured
+   so far is 10 GiB, and nothing in the design changes above it — opens in
+   milliseconds; rows are on screen while the index and the SHA-256 are
+   computed in the background. The window says what it is looking at:
+   size, record count, digest, parser settings, malformed-row counts.
 2. *Search for the indicator.* `/c2/beacon`, or a regex over the
    user-agent column. Matches are counted and shown; nothing is copied.
 3. *Narrow and pivot.* Timeline of the matches; drag the spike; filter to
@@ -115,14 +117,21 @@ Other recurring uses:
 ## What follows from this — the design principles
 
 1. **The source is evidence.** Opened read-only; never rewritten; hashed on
-   open. Everything the analyst produces is a *new* file that names its
-   source.
-2. **Memory is bounded regardless of file size.** A sparse, quote-aware
-   index of a few KiB per GiB is the only state; a 10 GiB file is
-   navigated with ~10 MiB of RSS, and the design does not change at
-   100 GiB.
+   open. Every path the tool writes — output, manifest, index sidecar,
+   their temporaries — is checked against the source before anything is
+   created, and a source that changes on disk is detected before a scan or
+   an export goes ahead. Everything the analyst produces is a *new* file
+   that names its source.
+2. **Memory does not grow with the file.** The source is never loaded; a
+   sparse, quote-aware index of a few KiB per GiB and fixed buffers are
+   what navigation needs, so the index pass measures the same ~35 MiB at
+   1 GiB and at 10 GiB. Results (match sets, count tables, lookup tables)
+   take memory in proportion to themselves, never to the file, and the
+   design does not change at 100 GiB.
 3. **The investigation is visible and recorded.** The chain of selection
-   steps is on screen and in the manifest; it is the same object.
+   steps is on screen and in the manifest; it is the same object. A step
+   that was cancelled or failed is marked as such and cannot be exported,
+   counted or filtered further — a partial scan never passes for a result.
 4. **Offline is a guarantee, not an option.** No telemetry, no update
    checks, no DNS. Enrichment reads local datasets identified by hash.
 5. **Numbers are honest.** Exact counts are exact; lossy counts, estimated

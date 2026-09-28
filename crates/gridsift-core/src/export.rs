@@ -200,6 +200,87 @@ pub struct ExportReport {
     pub elapsed: Duration,
     /// `false` if cancelled; no output file exists in that case.
     pub complete: bool,
+    /// The manifest written next to the output, if one was committed.
+    pub manifest: Option<PathBuf>,
+}
+
+/// A finished export that has not been published yet: the records sit in a
+/// temporary file next to the destination. [`PendingExport::commit`] writes
+/// the manifest (if any) and renames the output into place; dropping the
+/// value discards the temporary file.
+///
+/// Splitting the export in two lets the caller build the manifest from the
+/// output's digest *before* anything visible exists, so the destination
+/// never holds an output without its provenance.
+#[must_use = "commit() or abort() the export"]
+pub struct PendingExport<'s> {
+    source: &'s Source,
+    tmp: PathBuf,
+    out: PathBuf,
+    report: ExportReport,
+    done: bool,
+}
+
+impl PendingExport<'_> {
+    pub fn report(&self) -> &ExportReport {
+        &self.report
+    }
+
+    /// Publish: manifest (staged and renamed) first, then the output. Both
+    /// renames replace atomically, so an interrupted overwrite leaves the
+    /// previous artefact of that name, never a truncated one. The one
+    /// window that remains — a crash between the two renames — leaves a
+    /// manifest whose recorded digest `verify` will flag against the older
+    /// output.
+    pub fn commit(
+        mut self,
+        manifest: Option<&crate::manifest::Manifest>,
+    ) -> io::Result<ExportReport> {
+        self.done = true;
+        if !self.report.complete {
+            let _ = fs::remove_file(&self.tmp);
+            return Ok(self.report.clone());
+        }
+        let fail = |tmp: &Path, e: io::Error| {
+            let _ = fs::remove_file(tmp);
+            Err(e)
+        };
+        // the evidence must still be what the digest in the manifest says
+        if let Err(e) = self.source.ensure_unchanged() {
+            return fail(&self.tmp, e);
+        }
+        let mut mpath = None;
+        if let Some(m) = manifest {
+            let p = crate::manifest::Manifest::path_for(&self.out);
+            if let Err(e) = m.write_for(self.source, &p) {
+                return fail(&self.tmp, e);
+            }
+            mpath = Some(p);
+        }
+        if let Err(e) = fs::rename(&self.tmp, &self.out) {
+            // do not leave a manifest that claims an output which never appeared
+            if let Some(p) = &mpath {
+                let _ = fs::remove_file(p);
+            }
+            return fail(&self.tmp, e);
+        }
+        self.report.manifest = mpath;
+        Ok(self.report.clone())
+    }
+
+    /// Discard the temporary output.
+    pub fn abort(mut self) {
+        self.done = true;
+        let _ = fs::remove_file(&self.tmp);
+    }
+}
+
+impl Drop for PendingExport<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
 }
 
 /// Writer that hashes everything it writes.
@@ -218,8 +299,8 @@ impl<W: Write> Tee<W> {
     }
 }
 
-/// Run an export. `progress` receives `(records written, source bytes
-/// consumed)` periodically.
+/// Run an export and publish it without a manifest. `progress` receives
+/// `(records written, source bytes consumed)` periodically.
 pub fn export(
     source: &Source,
     index: &SparseIndex,
@@ -228,9 +309,27 @@ pub fn export(
     out: &Path,
     progress: &mut dyn FnMut(u64, u64),
 ) -> io::Result<ExportReport> {
+    export_pending(source, index, selection, opts, out, progress)?.commit(None)
+}
+
+/// Run an export into a temporary file and hand back the digest without
+/// publishing anything; see [`PendingExport`]. The output plan (the
+/// destination and its temporary) is checked against the evidence, and
+/// the source must be unchanged since it was opened, before any byte is
+/// written.
+pub fn export_pending<'s>(
+    source: &'s Source,
+    index: &SparseIndex,
+    selection: Selection<'_>,
+    opts: ExportOptions<'_>,
+    out: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> io::Result<PendingExport<'s>> {
     let started = Instant::now();
     guard_output_path(source, out, opts.overwrite)?;
     let tmp = temp_path(out);
+    source.guard_not_source(&tmp)?;
+    source.ensure_unchanged()?;
     let file = fs::File::create(&tmp)?;
     let mut w = Tee {
         inner: BufWriter::with_capacity(4 << 20, file),
@@ -347,33 +446,61 @@ pub fn export(
 
     match result {
         Ok(true) => {
-            w.inner.flush()?;
-            let file = w.inner.into_inner().map_err(|e| e.into_error())?;
-            file.sync_all()?;
-            drop(file);
-            if opts.overwrite && out.exists() {
-                fs::remove_file(out)?;
+            if let Err(e) = w.inner.flush() {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
             }
-            fs::rename(&tmp, out)?;
-            Ok(ExportReport {
-                path: out.to_path_buf(),
-                records,
-                bytes: w.bytes,
-                digests: w.hasher.finalize(),
-                elapsed: started.elapsed(),
-                complete: true,
+            let Tee {
+                inner,
+                hasher,
+                bytes,
+            } = w;
+            let file = match inner.into_inner() {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e.into_error());
+                }
+            };
+            if let Err(e) = file.sync_all() {
+                drop(file);
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+            drop(file);
+            Ok(PendingExport {
+                source,
+                tmp,
+                out: out.to_path_buf(),
+                report: ExportReport {
+                    path: out.to_path_buf(),
+                    records,
+                    bytes,
+                    digests: hasher.finalize(),
+                    elapsed: started.elapsed(),
+                    complete: true,
+                    manifest: None,
+                },
+                done: false,
             })
         }
         Ok(false) => {
             drop(w);
             let _ = fs::remove_file(&tmp);
-            Ok(ExportReport {
-                path: out.to_path_buf(),
-                records,
-                bytes: 0,
-                digests: Digests::default(),
-                elapsed: started.elapsed(),
-                complete: false,
+            Ok(PendingExport {
+                source,
+                tmp,
+                out: out.to_path_buf(),
+                report: ExportReport {
+                    path: out.to_path_buf(),
+                    records,
+                    bytes: 0,
+                    digests: Digests::default(),
+                    elapsed: started.elapsed(),
+                    complete: false,
+                    manifest: None,
+                },
+                done: false,
             })
         }
         Err(e) => {
@@ -387,14 +514,7 @@ pub fn export(
 /// Refuse to write onto the evidence itself, or over an existing file
 /// unless asked to.
 fn guard_output_path(source: &Source, out: &Path, overwrite: bool) -> io::Result<()> {
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(source.path()), fs::canonicalize(out)) {
-        if a == b {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "refusing to overwrite the source file",
-            ));
-        }
-    }
+    source.guard_not_source(out)?;
     if out.exists() && !overwrite {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -421,6 +541,7 @@ fn temp_path(out: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::hex;
     use crate::index::{BuildOptions, IndexParams, build_index};
     use crate::search::{SearchOptions, SearchQuery, SearchShared, search};
     use std::sync::atomic::AtomicUsize;
@@ -674,5 +795,160 @@ mod tests {
         assert!(!rep.complete);
         assert!(!out2.exists());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2); // source + out.csv
+    }
+
+    #[test]
+    fn output_plan_never_touches_the_evidence() {
+        let dir = workdir();
+        let (src, idx) = fixture(&dir, b"a,b\n1,2\n", 1);
+        let before = fs::read(src.path()).unwrap();
+        // a hard link or copy with the source's identity is refused too
+        let twin = dir.join("twin.csv");
+        fs::hard_link(src.path(), &twin).unwrap();
+        for target in [src.path().to_path_buf(), twin.clone()] {
+            let e = export(
+                &src,
+                &idx,
+                Selection::All,
+                ExportOptions {
+                    overwrite: true,
+                    ..ExportOptions::default()
+                },
+                &target,
+                &mut |_, _| {},
+            )
+            .unwrap_err();
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidInput,
+                "{}",
+                target.display()
+            );
+            assert!(src.guard_not_source(&target).is_err());
+        }
+        assert_eq!(fs::read(src.path()).unwrap(), before);
+        // the manifest path and index sidecar go through the same check
+        let m = crate::manifest::Manifest::new(
+            crate::manifest::SourceInfo::from_source(&src, idx.params.dialect, idx.digests, None),
+            vec![],
+            crate::manifest::SelectionInfo::All,
+            crate::manifest::OutputInfo {
+                path: String::new(),
+                name: String::new(),
+                format: "csv".into(),
+                content: "raw-records".into(),
+                header: true,
+                terminator: "\n".into(),
+                records: 0,
+                size: 0,
+                sha256: None,
+                blake3: None,
+            },
+        );
+        assert!(m.write_for(&src, src.path()).is_err());
+        assert!(idx.save_for(&src, src.path()).is_err());
+        assert!(idx.save(&twin).is_err());
+        assert_eq!(fs::read(src.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn commit_publishes_manifest_then_output_and_detects_a_changed_source() {
+        let dir = workdir();
+        let (src, idx) = fixture(&dir, b"a,b\n1,2\n3,4\n", 1);
+        let out = dir.join("out.csv");
+        let pending = export_pending(
+            &src,
+            &idx,
+            Selection::All,
+            ExportOptions::default(),
+            &out,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        // nothing visible before commit
+        assert!(!out.exists());
+        let digest = hex(&pending.report().digests.sha256.unwrap());
+        let m = crate::manifest::Manifest::new(
+            crate::manifest::SourceInfo::from_source(&src, idx.params.dialect, idx.digests, None),
+            vec![],
+            crate::manifest::SelectionInfo::All,
+            crate::manifest::OutputInfo {
+                path: out.display().to_string(),
+                name: "out.csv".into(),
+                format: "csv".into(),
+                content: "raw-records".into(),
+                header: true,
+                terminator: "\n".into(),
+                records: pending.report().records,
+                size: pending.report().bytes,
+                sha256: Some(digest.clone()),
+                blake3: None,
+            },
+        );
+        let rep = pending.commit(Some(&m)).unwrap();
+        let mpath = crate::manifest::Manifest::path_for(&out);
+        assert_eq!(rep.manifest.as_deref(), Some(mpath.as_path()));
+        assert!(out.exists() && mpath.exists());
+        assert_eq!(
+            crate::manifest::Manifest::read(&mpath)
+                .unwrap()
+                .output
+                .sha256,
+            Some(digest)
+        );
+        // no temporaries left behind
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 3);
+
+        // an aborted pending export leaves the previous artefacts alone
+        let pending = export_pending(
+            &src,
+            &idx,
+            Selection::Range { first: 0, count: 1 },
+            ExportOptions {
+                overwrite: true,
+                ..ExportOptions::default()
+            },
+            &out,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        pending.abort();
+        assert_eq!(rep.bytes, fs::metadata(&out).unwrap().len());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 3);
+
+        // the evidence changes under us: neither a new export nor a commit
+        // may go through with the old digest
+        let pending = export_pending(
+            &src,
+            &idx,
+            Selection::All,
+            ExportOptions {
+                overwrite: true,
+                ..ExportOptions::default()
+            },
+            &out,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(src.path())
+            .unwrap();
+        f.write_all(b"5,6\n").unwrap();
+        drop(f);
+        assert!(pending.commit(None).is_err());
+        assert!(
+            export_pending(
+                &src,
+                &idx,
+                Selection::All,
+                ExportOptions::default(),
+                &dir.join("later.csv"),
+                &mut |_, _| {},
+            )
+            .is_err()
+        );
+        assert_eq!(rep.bytes, fs::metadata(&out).unwrap().len());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 3);
     }
 }
