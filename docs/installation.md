@@ -1,7 +1,7 @@
 # Installation
 
-gridsift is not on crates.io yet; build it from source. Rust 1.87 or newer
-is required (edition 2024; 1.87 is what the dependency graph needs).
+gridsift is not on crates.io yet; build it from source. Rust 1.88 or newer
+is required (edition 2024; 1.88 is what the dependency graph needs — the Linux file-dialog backend).
 
 ## Build from source
 

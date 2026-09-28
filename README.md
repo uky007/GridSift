@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/uky007/GridSift/actions/workflows/ci.yml/badge.svg)](https://github.com/uky007/GridSift/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 An offline, evidence-safe workbench for investigating multi-gigabyte CSV
 security data — without loading it into RAM, uploading it anywhere, or
@@ -38,7 +38,7 @@ application for Linux, macOS and Windows.
 
 ## Quick install
 
-Rust 1.87 or newer. Not on crates.io yet — build from source:
+Rust 1.88 or newer. Not on crates.io yet — build from source:
 
 ```
 git clone https://github.com/uky007/GridSift.git

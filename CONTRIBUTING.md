@@ -25,7 +25,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 CI runs the same on Linux, macOS and Windows with the stable toolchain and
-a `cargo check` on the minimum supported Rust version (1.87). The scanner
+a `cargo check` on the minimum supported Rust version (1.88). The scanner
 is checked against the `csv` crate on a torture corpus and on random input
 (`crates/gridsift-core/tests/differential.rs`); the command-line tool has
 end-to-end tests (`crates/gridsift-cli/tests/cli.rs`) that run the real
