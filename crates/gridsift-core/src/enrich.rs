@@ -764,6 +764,7 @@ mod tests {
     fn psl_version_matches_lockfile() {
         let lock =
             fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")).unwrap();
+        let lock = lock.replace('\r', ""); // CRLF checkouts on Windows
         let needle = format!("name = \"psl\"\nversion = \"{PSL_VERSION}\"");
         assert!(
             lock.contains(&needle),
