@@ -40,12 +40,13 @@ crates/gridsift-core     engine: source, dialect sniffing, scanner, sparse index
 crates/gridsift-cli      `gridsift` command-line tool (info / index / rows /
                          search / freq / timeline / export / verify / profile /
                          count / hash / gen)
-crates/gridsift-desktop  `gridsift-desktop`, the egui application: open a file,
-                         rows appear immediately, index + SHA-256 build in the
-                         background, virtual grid with go-to-row, parallel
-                         literal/regex search with highlight or filtered view,
-                         value counts with click-to-filter, offline enrichment,
-                         export with redaction and manifest
+crates/gridsift-desktop  `gridsift-desktop`, the egui application: an evidence
+                         sidebar (facts, typed columns with per-column actions,
+                         enrichment rules, export), a command bar whose
+                         selection lineage is shown as breadcrumb chips, the
+                         virtual grid, and an analysis dock (timeline / values /
+                         profile). Rows appear immediately, index + SHA-256
+                         build in the background; see `docs/design/`
 bench/                   benchmark procedure and baseline numbers
 survey/                  background research the design is based on
 ```
@@ -74,8 +75,13 @@ gridsift profile /tmp/narrow-1g.csv         # what each column holds: ipv4, doma
 gridsift freq /tmp/narrow-1g.csv -c host -n 20               # top hosts over all records
 gridsift freq /tmp/narrow-1g.csv -c dst_port -s ',deny,'     # …over the records matching a search
 gridsift-desktop /tmp/narrow-1g.csv         # or drag & drop onto the window
-gridsift-desktop /tmp/narrow-1g.csv --search '/c2/beacon' --filter
+gridsift-desktop /tmp/narrow-1g.csv --search '/c2/beacon' --timeline
 ```
+
+In the desktop app the investigation is a chain of selection steps — a
+search, a click on a value, a time range dragged on the timeline — each
+shown as a chip with its match count. Clicking a chip reverts to that step
+without rescanning; the chain is exactly what the export manifest records.
 
 `export` writes the selected records as their exact source bytes (quoting
 preserved, terminators normalised) to a new file, atomically, and puts a
@@ -108,7 +114,8 @@ never the key itself — so a later export can be checked for having used the
 same key. HMAC pseudonyms preserve correlation across rows and files, which
 is the point; they are not an anonymity guarantee against anyone who can
 enumerate candidate values. The desktop app has the same options in its
-Export dialog.
+Export dialog (per column, next to the column's detected type), and a
+column's menu offers *Redact on export…* directly.
 
 The desktop app and the CLI share the index sidecar (stored under the user
 cache directory, never next to the evidence), so a file indexed by one opens
@@ -159,8 +166,9 @@ one), recorded in the manifest as a `time_range` operation.
 
 ## Value counts
 
-`freq` (and the desktop "Count values of" panel) counts the values of one
-column over all records or over a search's matches, on all cores. Counting
+`freq` (and the desktop *Values* tab, from a column's *Count values*) counts
+the values of one column over all records or over the current selection, on
+all cores. Counting
 is exact up to 131,072 distinct values per worker; beyond that it switches
 to lossy counting so memory stays bounded on high-cardinality columns
 (hashes, unique IDs), and the result then says so and gives an error bound.
@@ -170,7 +178,7 @@ by it — the pivot step of an investigation.
 
 ## Semantic typing
 
-`profile` (and the desktop grid header) labels each column with what it
+`profile` (and the desktop sidebar, grid header and *Profile* tab) labels each column with what it
 appears to hold — `timestamp`, `ipv4`, `ipv6`, `ip:port`, `mac`, `domain`,
 `url`, `email`, `md5`/`sha1`/`sha256`, `uuid`, `port`, `http_status`,
 `integer`, `float`, `boolean`, `categorical`, `text` — from a sample drawn
