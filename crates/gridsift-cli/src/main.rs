@@ -368,6 +368,21 @@ impl EnrichArgs {
     }
 }
 
+/// Split `PATH:KEY[:VALUES]` at the colon that ends the path. A Windows
+/// drive letter (`C:\…` or `C:/…`) is part of the path, not a separator.
+fn split_lookup_path(spec: &str) -> (&str, &str) {
+    let b = spec.as_bytes();
+    let drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    let start = if drive { 2 } else { 0 };
+    match spec[start..].find(':') {
+        Some(i) => (&spec[..start + i], &spec[start + i + 1..]),
+        None => (spec, ""),
+    }
+}
+
 /// Build the enrichment described by `--geoip/--domain/--lookup`.
 fn build_enrichment(
     args: &EnrichArgs,
@@ -424,10 +439,11 @@ fn build_enrichment(
             anyhow::anyhow!("--lookup expects COLUMN=PATH:KEY[:VALUES], got {spec:?}")
         })?;
         let (column, name) = column_of(col)?;
-        let mut parts = rest.splitn(3, ':');
-        let path = parts.next().unwrap_or_default();
+        let (path, rest) = split_lookup_path(rest);
+        let mut parts = rest.splitn(2, ':');
         let key = parts
             .next()
+            .filter(|k| !k.is_empty())
             .ok_or_else(|| anyhow::anyhow!("--lookup needs a KEY column: {spec:?}"))?;
         let values: Vec<String> = parts
             .next()
@@ -2399,5 +2415,27 @@ fn human_duration(secs: i64) -> String {
         s if s % 3600 == 0 => format!("{}h", s / 3600),
         s if s % 60 == 0 => format!("{}m", s / 60),
         s => format!("{s}s"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_lookup_path;
+
+    #[test]
+    fn lookup_spec_keeps_windows_drive_letters() {
+        assert_eq!(
+            split_lookup_path("assets.csv:ip:owner,site"),
+            ("assets.csv", "ip:owner,site")
+        );
+        assert_eq!(split_lookup_path("/data/a.csv:ip"), ("/data/a.csv", "ip"));
+        assert_eq!(
+            split_lookup_path("C:\\cases\\a.csv:ip:owner"),
+            ("C:\\cases\\a.csv", "ip:owner")
+        );
+        assert_eq!(split_lookup_path("D:/x/a.csv:key"), ("D:/x/a.csv", "key"));
+        assert_eq!(split_lookup_path("no-key.csv"), ("no-key.csv", ""));
+        // a bare "c:" without a path separator is a path ending at the colon
+        assert_eq!(split_lookup_path("c:ip"), ("c", "ip"));
     }
 }

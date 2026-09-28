@@ -166,11 +166,15 @@ impl Source {
         }
     }
 
-    /// Refuse a write target that is the evidence itself: by path, and —
-    /// when the target exists — by file identity (device and inode on Unix,
-    /// size and modification time everywhere). Every file gridsift writes
-    /// (exports, manifests, index sidecars and their temporaries) passes
-    /// through this check before anything is created.
+    /// Refuse a write target that is the evidence itself: by canonical path,
+    /// and — when the target exists — by file identity. Every file gridsift
+    /// writes (exports, manifests, index sidecars and their temporaries)
+    /// passes through this check before anything is created.
+    ///
+    /// Size and modification time are deliberately *not* used as identity:
+    /// two files written in the same clock tick with the same length are
+    /// indistinguishable that way, and refusing them would block legitimate
+    /// exports.
     pub fn guard_not_source(&self, target: &Path) -> io::Result<()> {
         let refuse = || {
             Err(io::Error::new(
@@ -188,23 +192,10 @@ impl Source {
         {
             return refuse();
         }
-        let Ok(meta) = std::fs::metadata(target) else {
-            return Ok(());
-        };
-        if !meta.is_file() {
-            return Ok(());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if let Ok(mine) = self.file.metadata()
-                && meta.dev() == mine.dev()
-                && meta.ino() == mine.ino()
-            {
-                return refuse();
-            }
-        }
-        if SourceId::from_metadata(&meta) == self.id {
+        // File identity (device + inode on Unix, volume + file index on
+        // Windows) catches hard links and junctions that canonical paths do
+        // not; a target that does not exist yet cannot be the source.
+        if same_file::is_same_file(&self.path, target).unwrap_or(false) {
             return refuse();
         }
         Ok(())

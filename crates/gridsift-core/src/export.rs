@@ -847,7 +847,7 @@ mod tests {
         );
         assert!(m.write_for(&src, src.path()).is_err());
         assert!(idx.save_for(&src, src.path()).is_err());
-        assert!(idx.save(&twin).is_err());
+        assert!(idx.save_for(&src, &twin).is_err());
         assert_eq!(fs::read(src.path()).unwrap(), before);
     }
 

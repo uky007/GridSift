@@ -126,28 +126,13 @@ impl SparseIndex {
         self.source == id
     }
 
-    /// Write the sidecar. Refuses a target that carries the identity of the
-    /// indexed source (a copy of the evidence, or the evidence itself);
-    /// [`SparseIndex::save_for`] additionally checks the path against the
-    /// open source and is what callers should use.
+    /// Write the sidecar (temp file + rename). This does not know the source
+    /// file; callers that hold it use [`SparseIndex::save_for`], which
+    /// refuses to write over it.
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let bytes = self.to_bytes();
         let path = path.as_ref();
         let tmp = temp_path(path);
-        for p in [path, tmp.as_path()] {
-            if let Ok(meta) = fs::metadata(p)
-                && meta.is_file()
-                && SourceId::from_metadata(&meta) == self.source
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "refusing to write the index over {}: it has the identity of the indexed source",
-                        p.display()
-                    ),
-                ));
-            }
-        }
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
