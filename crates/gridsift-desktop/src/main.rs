@@ -12,6 +12,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cache;
+mod dashboard;
 mod dialogs;
 mod document;
 mod jobs;
@@ -36,6 +37,7 @@ struct Launch {
     count: Option<usize>,
     domain: Vec<usize>,
     timeline: bool,
+    dashboard: bool,
     /// Smoke-test hooks: open a dialog at startup.
     export_dialog: bool,
     enrich_dialog: bool,
@@ -49,6 +51,7 @@ fn parse_args() -> Launch {
         count: None,
         domain: Vec::new(),
         timeline: false,
+        dashboard: false,
         export_dialog: false,
         enrich_dialog: false,
     };
@@ -63,6 +66,7 @@ fn parse_args() -> Launch {
                 .domain
                 .extend(args.next().and_then(|c| c.parse::<usize>().ok())),
             "--timeline" => l.timeline = true,
+            "--dashboard" => l.dashboard = true,
             "--export-dialog" => l.export_dialog = true,
             "--enrich-dialog" => l.enrich_dialog = true,
             _ if l.file.is_none() => l.file = Some(PathBuf::from(a)),
@@ -116,6 +120,9 @@ fn main() -> Result<(), eframe::Error> {
                         && let Some(c) = d.timestamp_column()
                     {
                         d.start_timeline(c);
+                    }
+                    if launch.dashboard {
+                        d.open_dashboard();
                     }
                     if launch.export_dialog {
                         d.export_ui.show(d.header.len());
@@ -224,6 +231,14 @@ fn apply_to_document(ctx: &egui::Context, d: &mut Document, action: Action) {
             d.start_search(ctx);
         }
         Action::FilterRange(column, from, to) => d.start_time_range(ctx, column, from, to),
+        Action::Dashboard => d.open_dashboard(),
+        Action::AutoBuild => {
+            d.auto_build_dashboard();
+            d.open_dashboard();
+        }
+        Action::AddPanel(c) => d.add_panel(c),
+        Action::RemovePanel(i) => d.remove_panel(i),
+        Action::PanelKind(i, kind) => d.set_panel_kind(i, kind),
         Action::GoTo(r) => {
             let max = d.known_rows.saturating_sub(1);
             d.pending_scroll = Some(r.min(max));

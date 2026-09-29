@@ -29,7 +29,8 @@ use gridsift_core::timeline::{TimelineOptions, current_year, select_time_range, 
 
 use crate::cache::RowCache;
 use crate::jobs::{
-    BuildJob, ExportJob, FreqJob, FreqView, SelectionNode, SelectionOp, TimelineJob, TimelineView,
+    BuildJob, ChartKind, Dashboard, ExportJob, FreqJob, FreqView, Panel, SelectionNode,
+    SelectionOp, TimelineJob, TimelineView,
 };
 
 /// Rows probed synchronously at open time, before the background index runs.
@@ -328,6 +329,7 @@ impl RuleSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockTab {
+    Dashboard,
     Timeline,
     Values,
     Profile,
@@ -374,6 +376,7 @@ pub struct Document {
     pub freq: Option<FreqView>,
     pub dock_tab: DockTab,
     pub dock_open: bool,
+    pub dashboard: Dashboard,
 
     /// Open → first rows on screen.
     pub first_rows_in: Duration,
@@ -501,8 +504,9 @@ impl Document {
             timeline: None,
             freq_job: None,
             freq: None,
-            dock_tab: DockTab::Timeline,
+            dock_tab: DockTab::Dashboard,
             dock_open: false,
+            dashboard: Dashboard::default(),
             first_rows_in,
             index_elapsed: None,
             index_from_sidecar: from_sidecar,
@@ -556,6 +560,7 @@ impl Document {
             || self.export.is_some()
             || self.profile_job.is_some()
             || self.digest_job.is_some()
+            || self.dashboard.running()
     }
 
     pub fn index_complete(&self) -> bool {
@@ -628,6 +633,7 @@ impl Document {
         }
         self.poll_freq();
         self.poll_timeline();
+        self.poll_dashboard();
         self.poll_export();
     }
 
@@ -923,9 +929,16 @@ impl Document {
         if !self.guard_source() {
             return;
         }
-        let Some(index) = self.index_snapshot() else {
-            return;
-        };
+        self.freq_job = self.spawn_freq(column, 500);
+        self.dock_tab = DockTab::Values;
+        self.dock_open = true;
+    }
+
+    /// Count the values of `column` over the current selection on a worker
+    /// thread; the caller has checked the source. Used by the Values tab
+    /// and by every dashboard panel.
+    fn spawn_freq(&self, column: usize, top: usize) -> Option<FreqJob> {
+        let index = self.index_snapshot()?;
         let base = self.scan_base();
         let shared = Arc::new(FrequencyShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
@@ -956,7 +969,7 @@ impl Document {
                 };
                 let opts = FrequencyOptions {
                     column,
-                    top: 500,
+                    top,
                     enrichment: enrichment.as_deref(),
                     cancel: Some(&c2),
                     ..FrequencyOptions::default()
@@ -964,15 +977,13 @@ impl Document {
                 frequency(&source, &index, selection, opts, &s2)
             })
             .expect("spawn freq thread");
-        self.freq_job = Some(FreqJob {
+        Some(FreqJob {
             shared,
             cancel,
             handle: Some(handle),
             column,
             base,
-        });
-        self.dock_tab = DockTab::Values;
-        self.dock_open = true;
+        })
     }
 
     fn poll_freq(&mut self) {
@@ -988,22 +999,10 @@ impl Document {
         self.freq_job = None;
         match handle.join() {
             Ok(Ok(result)) if result.complete => {
-                let total = result.counted.max(1) as f32;
-                let rows = result
-                    .top
-                    .iter()
-                    .map(|e| {
-                        (
-                            String::from_utf8_lossy(&e.value).into_owned(),
-                            e.count,
-                            e.count as f32 / total,
-                        )
-                    })
-                    .collect();
                 self.freq = Some(FreqView {
                     column,
+                    rows: freq_rows(&result),
                     result,
-                    rows,
                     base,
                 });
             }
@@ -1013,14 +1012,187 @@ impl Document {
         }
     }
 
+    // -- dashboard ---------------------------------------------------------
+
+    /// Show the dashboard, building it from the column profile the first
+    /// time.
+    pub fn open_dashboard(&mut self) {
+        if self.dashboard.panels.is_empty() && !self.dashboard.auto_built {
+            self.auto_build_dashboard();
+        }
+        self.dock_tab = DockTab::Dashboard;
+        self.dock_open = true;
+        self.dashboard.stale = true;
+    }
+
+    /// Pick charts from what the columns hold: a pie for a column with a
+    /// handful of values (protocol, action, status), top-value bars for
+    /// hosts, addresses, ports and paths; the timestamp column is the
+    /// timeline. Hashes, free text and numbers are skipped. At most six
+    /// panels; the analyst adds or removes the rest.
+    pub fn auto_build_dashboard(&mut self) {
+        let Some(p) = &self.profile else { return };
+        let mut picks: Vec<(usize, ChartKind, u8)> = Vec::new();
+        for c in &p.columns {
+            let (kind, priority) = match c.detected {
+                SemanticType::Boolean => (ChartKind::Pie, 1),
+                SemanticType::Categorical | SemanticType::HttpStatus if c.distinct <= 6 => {
+                    (ChartKind::Pie, 1)
+                }
+                SemanticType::Categorical | SemanticType::HttpStatus if c.distinct <= 60 => {
+                    (ChartKind::Bars, 3)
+                }
+                SemanticType::Domain | SemanticType::Url | SemanticType::Email => {
+                    (ChartKind::Bars, 2)
+                }
+                SemanticType::Ipv4 | SemanticType::Ipv6 | SemanticType::IpPort => {
+                    (ChartKind::Bars, 2)
+                }
+                SemanticType::Port | SemanticType::Mac => (ChartKind::Bars, 3),
+                _ => continue,
+            };
+            picks.push((c.index, kind, priority));
+        }
+        picks.sort_by_key(|&(i, _, priority)| (priority, i));
+        picks.truncate(6);
+        picks.sort_by_key(|&(i, _, _)| i);
+        for p in &self.dashboard.panels {
+            if let Some(j) = &p.job {
+                j.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        self.dashboard.panels = picks
+            .into_iter()
+            .map(|(column, kind, _)| Panel::new(column, kind))
+            .collect();
+        self.dashboard.auto_built = true;
+        self.dashboard.stale = true;
+    }
+
+    pub fn add_panel(&mut self, column: usize) {
+        if self.dashboard.panels.iter().any(|p| p.column == column) {
+            return;
+        }
+        let kind = match self.profile.as_ref().and_then(|p| p.column(column)) {
+            Some(c)
+                if c.distinct <= 6
+                    && matches!(
+                        c.detected,
+                        SemanticType::Categorical
+                            | SemanticType::HttpStatus
+                            | SemanticType::Boolean
+                    ) =>
+            {
+                ChartKind::Pie
+            }
+            _ => ChartKind::Bars,
+        };
+        self.dashboard.panels.push(Panel::new(column, kind));
+        self.dashboard.stale = true;
+        self.dock_tab = DockTab::Dashboard;
+        self.dock_open = true;
+    }
+
+    pub fn remove_panel(&mut self, i: usize) {
+        if i < self.dashboard.panels.len() {
+            let p = self.dashboard.panels.remove(i);
+            if let Some(j) = &p.job {
+                j.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn set_panel_kind(&mut self, i: usize, kind: ChartKind) {
+        if let Some(p) = self.dashboard.panels.get_mut(i) {
+            p.kind = kind;
+        }
+    }
+
+    /// Identity of the selection the dashboard reflects.
+    fn dashboard_key(&self) -> (usize, bool) {
+        (
+            self.selection
+                .as_ref()
+                .map_or(0, |s| Arc::as_ptr(s) as usize),
+            self.search_ui.show_only,
+        )
+    }
+
+    /// Recount every panel (and the timeline) over the current selection.
+    fn refresh_dashboard(&mut self) {
+        if !self.guard_source() {
+            return;
+        }
+        let columns: Vec<usize> = self.dashboard.panels.iter().map(|p| p.column).collect();
+        let jobs: Vec<Option<FreqJob>> = columns.iter().map(|&c| self.spawn_freq(c, 12)).collect();
+        for (p, job) in self.dashboard.panels.iter_mut().zip(jobs) {
+            if let Some(old) = &p.job {
+                old.cancel.store(true, Ordering::Relaxed);
+            }
+            p.job = job;
+            p.error = None;
+        }
+        if let Some(c) = self.timestamp_column() {
+            self.start_timeline_inner(c, false);
+        }
+    }
+
+    fn poll_dashboard(&mut self) {
+        for p in &mut self.dashboard.panels {
+            let Some(job) = &mut p.job else { continue };
+            if !job.handle.as_ref().is_some_and(|h| h.is_finished()) {
+                continue;
+            }
+            let handle = job.handle.take().expect("handle present until joined");
+            let column = job.column;
+            let base = job.base.as_ref().map(|n| n.count());
+            p.job = None;
+            match handle.join() {
+                Ok(Ok(result)) if result.complete => {
+                    p.view = Some(FreqView {
+                        column,
+                        rows: freq_rows(&result),
+                        result,
+                        base,
+                    });
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => p.error = Some(e.to_string()),
+                Err(_) => p.error = Some("count thread panicked".into()),
+            }
+        }
+        // a new selection step (or a change of view) makes the counts stale;
+        // they are recomputed when the dashboard is actually on screen
+        let key = self.dashboard_key();
+        if self.dashboard.key != Some(key) {
+            self.dashboard.key = Some(key);
+            self.dashboard.stale = true;
+        }
+        if self.dashboard.stale
+            && self.dock_open
+            && self.dock_tab == DockTab::Dashboard
+            && !self.dashboard.panels.is_empty()
+            && !self.source_changed
+        {
+            self.dashboard.stale = false;
+            self.refresh_dashboard();
+        }
+    }
+
     // -- timeline ----------------------------------------------------------
 
     pub fn start_timeline(&mut self, column: usize) {
-        if let Some(j) = &self.timeline_job {
-            j.cancel.store(true, Ordering::Relaxed);
-        }
         if !self.guard_source() {
             return;
+        }
+        self.start_timeline_inner(column, true);
+    }
+
+    /// The timeline job; `switch` shows the Timeline tab (the dashboard
+    /// refreshes it in place instead).
+    fn start_timeline_inner(&mut self, column: usize, switch: bool) {
+        if let Some(j) = &self.timeline_job {
+            j.cancel.store(true, Ordering::Relaxed);
         }
         let Some(index) = self.index_snapshot() else {
             return;
@@ -1065,8 +1237,10 @@ impl Document {
             column,
             base,
         });
-        self.dock_tab = DockTab::Timeline;
-        self.dock_open = true;
+        if switch {
+            self.dock_tab = DockTab::Timeline;
+            self.dock_open = true;
+        }
     }
 
     fn poll_timeline(&mut self) {
@@ -1297,7 +1471,12 @@ impl Document {
         ]
         .into_iter()
         .flatten()
-        {
+        .chain(
+            self.dashboard
+                .panels
+                .iter()
+                .filter_map(|p| p.job.as_ref().map(|j| j.cancel.clone())),
+        ) {
             c.store(true, Ordering::Relaxed);
         }
     }
@@ -1317,5 +1496,21 @@ pub fn column_widths<'a>(header: &[String], rows: impl Iterator<Item = &'a [Stri
     chars
         .into_iter()
         .map(|n| (n as f32 * 7.4 + 16.0).clamp(56.0, 420.0))
+        .collect()
+}
+
+/// `(value, count, share)` rows of a count, ready for display.
+fn freq_rows(result: &gridsift_core::frequency::FrequencyResult) -> Vec<(String, u64, f32)> {
+    let total = result.counted.max(1) as f32;
+    result
+        .top
+        .iter()
+        .map(|e| {
+            (
+                String::from_utf8_lossy(&e.value).into_owned(),
+                e.count,
+                e.count as f32 / total,
+            )
+        })
         .collect()
 }

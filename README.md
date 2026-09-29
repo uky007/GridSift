@@ -69,7 +69,7 @@ gridsift verify beacon.csv                               # re-hash output and so
 
 ```
 gridsift-desktop proxy.csv                               # or drag & drop onto the window
-gridsift-desktop proxy.csv --search '/c2/beacon' --timeline
+gridsift-desktop proxy.csv --search '/c2/beacon' --dashboard
 ```
 
 See [docs/usage.md](docs/usage.md) for every option, `jq` recipes and the
@@ -88,6 +88,10 @@ desktop walkthrough.
 - **Selection lineage** -- a search within a search within a time range:
   each step is a chip with its count, revertable without rescanning, and
   exactly what the manifest records.
+- **Dashboard** -- charts picked from what the columns hold: a timeline for
+  the timestamp column, pies for protocol / action / status, top-value
+  bars for hosts, addresses and ports. They follow the current selection,
+  and a click on a slice or bar is the next selection step.
 - **Value counts and timeline** -- top-N per column (exact, then lossy with
   a stated bound), records per time bucket with drag-to-select ranges.
 - **Semantic typing** -- columns labelled ipv4, domain, sha256, timestamp,
@@ -109,6 +113,10 @@ desktop walkthrough.
   command; approximate results say so.
 
 ## Screenshots
+
+### Dashboard: charts built from the column types, following the selection
+
+![gridsift dashboard](images/gridsift-dashboard.png)
 
 ### Desktop: search, lineage, timeline
 

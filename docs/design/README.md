@@ -97,6 +97,13 @@ Unchanged in function: virtual rows, typed headers (type + confidence on a
 second line), derived columns in green, matches in amber.
 
 ### Analysis dock (bottom, resizable, tabbed)
+- **Dashboard** (added after v1): cards picked from the profile — the
+  timeline, pies for columns with a handful of values, top-value bars for
+  hosts / addresses / ports — counted over the current selection and
+  refreshed when it changes; a click on a slice or bar is a new step.
+  Charts are painted directly (`dashboard.rs`) so slices and bars are
+  hoverable and clickable; the timeline card reuses the Timeline tab's
+  plot.
 - **Timeline**: chart of the current selection; drag → range chip
   ("Filter to range" becomes implicit: releasing the drag shows a floating
   *Filter* button on the selection).

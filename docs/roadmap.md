@@ -35,6 +35,8 @@ The go / no-go criteria for the whole project:
   **implemented**
 - Desktop application with the evidence sidebar, selection lineage, grid
   and analysis dock — **implemented** ([design/README.md](design/README.md))
+- Dashboard: charts picked from the column types, following the
+  selection, click-to-filter — **implemented**
 
 ## Phase 2 — before the demo
 

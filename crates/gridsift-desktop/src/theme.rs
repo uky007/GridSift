@@ -138,3 +138,15 @@ impl egui::Widget for Bar {
         response
     }
 }
+
+/// Categorical colours for pie slices and legends, in the order used.
+pub const PALETTE: [Color32; 8] = [
+    AMBER,
+    Color32::from_rgb(0x4e, 0xa8, 0xde),
+    GREEN,
+    Color32::from_rgb(0xe0, 0x7a, 0x5f),
+    Color32::from_rgb(0xb3, 0x8c, 0xf0),
+    Color32::from_rgb(0x3d, 0xc9, 0xb0),
+    KHAKI,
+    Color32::from_gray(150),
+];

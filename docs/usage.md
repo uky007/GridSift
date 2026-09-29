@@ -139,12 +139,12 @@ gridsift verify beacon.csv --json | jq '.ok'
 ```
 gridsift-desktop                                  # empty window: drop a file or press ⌘O / Ctrl+O
 gridsift-desktop proxy.csv                        # open a file
-gridsift-desktop proxy.csv --search '/c2/beacon' --timeline
+gridsift-desktop proxy.csv --search '/c2/beacon' --dashboard
 ```
 
 Launch options (`--search PATTERN [--regex]`, `--count COLUMN`,
-`--timeline`, `--domain COLUMN`) reproduce a state on start; they exist for
-demos and screenshots.
+`--timeline`, `--dashboard`, `--domain COLUMN`) reproduce a state on
+start; they exist for demos and screenshots.
 
 ### The window
 
@@ -170,9 +170,19 @@ demos and screenshots.
   work is cancelled and exports are disabled until the file is reopened.
 - **Grid** — virtual rows over the index; typed headers; derived columns in
   green. *Go to row* jumps by ordinal.
-- **Analysis dock** — *Timeline* (drag a range on the chart → *Filter to
-  range*), *Values* (top-N with share bars; click a value to filter by it),
-  *Profile* (the full column profile).
+- **Analysis dock** — *Dashboard* (below), *Timeline* (drag a range on the
+  chart → *Filter to range*), *Values* (top-N with share bars; click a
+  value to filter by it), *Profile* (the full column profile).
+- **Dashboard** — built from the column profile the first time it is
+  opened: the timestamp column becomes a timeline card; columns with a
+  handful of values (protocol, action, HTTP status, booleans) become pies;
+  hosts, addresses, ports and paths become top-value bars; hashes, free
+  text and plain numbers are skipped. Six panels at most by default —
+  *+ add column* or a column's *Add to dashboard* adds more, a panel's
+  menu switches pie ↔ bars or removes it, *Auto-build* starts over. The
+  charts are counted over the current selection and recount when it
+  changes; clicking a slice or a bar filters to that exact value (a new
+  lineage chip), and dragging on the timeline card selects a range.
 - **Status bar** — first rows time, index time, rows cached, peak RSS.
 
 ### An investigation, end to end

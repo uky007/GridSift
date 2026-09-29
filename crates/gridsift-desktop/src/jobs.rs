@@ -380,6 +380,72 @@ pub struct FreqView {
 }
 
 // ---------------------------------------------------------------------------
+// dashboard
+
+/// How a dashboard panel draws a column's value counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartKind {
+    /// Share of each value: for columns with a handful of values.
+    Pie,
+    /// Top values by count: for hosts, addresses, ports, paths.
+    Bars,
+}
+
+impl ChartKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ChartKind::Pie => "share",
+            ChartKind::Bars => "top values",
+        }
+    }
+}
+
+/// One chart of the dashboard: a column, how to draw it, and its counts
+/// over the current selection.
+pub struct Panel {
+    pub column: usize,
+    pub kind: ChartKind,
+    pub job: Option<FreqJob>,
+    pub view: Option<FreqView>,
+    pub error: Option<String>,
+}
+
+impl Panel {
+    pub fn new(column: usize, kind: ChartKind) -> Panel {
+        Panel {
+            column,
+            kind,
+            job: None,
+            view: None,
+            error: None,
+        }
+    }
+
+    pub fn running(&self) -> bool {
+        self.job.is_some()
+    }
+}
+
+/// The dashboard: charts picked from the column profile (or added by the
+/// analyst) that follow the current selection.
+#[derive(Default)]
+pub struct Dashboard {
+    pub panels: Vec<Panel>,
+    /// The selection the panels were last computed for, so a new step
+    /// marks them stale.
+    pub key: Option<(usize, bool)>,
+    /// Counts need recomputing (selection changed, panel added).
+    pub stale: bool,
+    pub auto_built: bool,
+}
+
+impl Dashboard {
+    pub fn running(&self) -> bool {
+        self.panels.iter().any(Panel::running)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // timeline
 
 pub struct TimelineJob {

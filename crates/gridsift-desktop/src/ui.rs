@@ -11,7 +11,7 @@ use gridsift_core::hash::hex;
 use gridsift_core::sys::{group_thousands, human_bytes, iso8601_utc, peak_rss_bytes};
 
 use crate::document::{DockTab, Document};
-use crate::jobs::{SelectionNode, SelectionState};
+use crate::jobs::{ChartKind, SelectionNode, SelectionState, TimelineView};
 use crate::theme::{
     self, AMBER, BLUE, CELL_TEXT, DIM, GREEN, HEADER_HEIGHT, HEADER_TEXT, KHAKI, RED, ROW_HEIGHT,
     ROW_NUMBER_TEXT, TEAL,
@@ -42,6 +42,13 @@ pub enum Action {
     /// Filter to a time range of `column`.
     FilterRange(usize, i64, i64),
     GoTo(u64),
+    /// Show the dashboard (built from the profile the first time).
+    Dashboard,
+    /// Rebuild the dashboard from the column profile.
+    AutoBuild,
+    AddPanel(usize),
+    RemovePanel(usize),
+    PanelKind(usize, ChartKind),
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +279,10 @@ fn columns_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
                     ui.set_min_width(180.0);
                     if ui.button("Count values").clicked() {
                         actions.push(Action::Count(i));
+                        ui.close();
+                    }
+                    if ui.button("Add to dashboard").clicked() {
+                        actions.push(Action::AddPanel(i));
                         ui.close();
                     }
                     if !derived {
@@ -635,9 +646,15 @@ pub fn dock(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
     if !d.dock_open {
         return actions;
     }
-    egui::TopBottomPanel::bottom("dock")
+    // one panel id per tab, so the dashboard opens tall and the tables
+    // keep their own height
+    let (id, default_height) = match d.dock_tab {
+        DockTab::Dashboard => ("dock-dashboard", 668.0),
+        _ => ("dock", 260.0),
+    };
+    egui::TopBottomPanel::bottom(id)
         .resizable(true)
-        .default_height(260.0)
+        .default_height(default_height)
         .frame(
             egui::Frame::NONE
                 .fill(theme::PANEL)
@@ -647,11 +664,15 @@ pub fn dock(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
             let mut close = false;
             ui.horizontal(|ui| {
                 for (tab, label) in [
+                    (DockTab::Dashboard, "Dashboard"),
                     (DockTab::Timeline, "Timeline"),
                     (DockTab::Values, "Values"),
                     (DockTab::Profile, "Profile"),
                 ] {
                     if ui.selectable_label(d.dock_tab == tab, label).clicked() {
+                        if tab == DockTab::Dashboard {
+                            actions.push(Action::Dashboard);
+                        }
                         d.dock_tab = tab;
                     }
                 }
@@ -663,6 +684,7 @@ pub fn dock(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
             });
             ui.separator();
             match d.dock_tab {
+                DockTab::Dashboard => crate::dashboard::dashboard_tab(ui, d, &mut actions),
                 DockTab::Timeline => timeline_tab(ui, d, &mut actions),
                 DockTab::Values => values_tab(ui, d, &mut actions),
                 DockTab::Profile => profile_tab(ui, d),
@@ -690,7 +712,7 @@ fn scope_label(ui: &mut egui::Ui, base: Option<u64>) {
 }
 
 /// Axis / tooltip label for a Unix-seconds x value.
-fn time_label(secs: f64, width: i64) -> String {
+pub(crate) fn time_label(secs: f64, width: i64) -> String {
     if secs < 0.0 {
         return format!("{secs:.0}");
     }
@@ -702,7 +724,7 @@ fn time_label(secs: f64, width: i64) -> String {
     }
 }
 
-fn human_width(secs: i64) -> String {
+pub(crate) fn human_width(secs: i64) -> String {
     match secs {
         s if s % 604_800 == 0 => format!("{}w", s / 604_800),
         s if s % 86_400 == 0 => format!("{}d", s / 86_400),
@@ -802,6 +824,13 @@ fn timeline_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) 
     if d.timeline_job.is_some() {
         return;
     }
+    let height = ui.available_height().max(100.0);
+    timeline_plot(ui, v, "timeline-plot", height);
+}
+
+/// The bucketed bar chart with drag-to-select; shared by the Timeline tab
+/// and the dashboard's timeline card.
+pub(crate) fn timeline_plot(ui: &mut egui::Ui, v: &mut TimelineView, id: &str, height: f32) {
     let width = v.width as f64;
     let ymax = v.bars.iter().map(|b| b.1).max().unwrap_or(1).max(1) as f64;
     let bars: Vec<Bar> = v
@@ -810,8 +839,8 @@ fn timeline_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) 
         .map(|&(s, c)| Bar::new(s as f64 + width / 2.0, c as f64).width(width * 0.9))
         .collect();
     let w = v.width;
-    Plot::new("timeline-plot")
-        .height(ui.available_height().max(100.0))
+    Plot::new(id)
+        .height(height)
         .allow_drag(false)
         .allow_zoom(false)
         .allow_scroll(false)
