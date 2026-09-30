@@ -252,7 +252,7 @@ fn timestamp_regex() -> &'static regex::bytes::RegexSet {
         regex::bytes::RegexSet::new([
             // ISO 8601 / RFC 3339, date-only allowed
             r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}([.,]\d{1,9})?)?)?(Z|[+-]\d{2}:?\d{2})?$",
-            r"^\d{4}/\d{2}/\d{2}( \d{2}:\d{2}(:\d{2})?)?$",
+            r"^\d{4}/\d{2}/\d{2}( \d{2}:\d{2}(:\d{2}([.,]\d{1,9})?)?)?(Z|[+-]\d{2}:?\d{2})?$",
             // Apache / CLF
             r"^\d{2}/[A-Z][a-z]{2}/\d{4}:\d{2}:\d{2}:\d{2}( [+-]\d{4})?$",
             // syslog
@@ -614,6 +614,7 @@ mod tests {
             ("2026-09-27T12:34:56Z", Timestamp),
             ("2026-09-27 12:34:56.123+09:00", Timestamp),
             ("2026-09-27", Timestamp),
+            ("2011/08/10 09:46:59.607825", Timestamp), // Argus / CTU-13 flows
             ("27/Sep/2026:12:34:56 +0900", Timestamp),
             ("Sep 27 12:34:56", Timestamp),
             ("9/27/2026 1:02:03 PM", Timestamp),
