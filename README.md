@@ -159,6 +159,7 @@ incident, host or indicator appears in them.
 - [Description & feature list](docs/description.md)
 - [Installation](docs/installation.md)
 - [Usage & examples](docs/usage.md)
+- [Demo on real traffic (CTU-13), with known answers](docs/demo.md)
 - [The provenance manifest](docs/manifest.md)
 - [Survey of existing tools](docs/survey.md)
 - [Roadmap](docs/roadmap.md)
