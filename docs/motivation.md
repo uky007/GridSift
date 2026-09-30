@@ -124,11 +124,13 @@ Other recurring uses:
    created, and a source that changes on disk is detected before a scan or
    an export goes ahead. Everything the analyst produces is a *new* file
    that names its source.
-2. **Memory does not grow with the file.** The source is never loaded; a
-   sparse, quote-aware index of a few KiB per GiB and fixed buffers are
-   what navigation needs, so the index pass measures the same ~35 MiB at
-   1 GiB and at 10 GiB. Results (match sets, count tables, lookup tables)
-   take memory in proportion to themselves, never to the file, and the
+2. **Memory is set by the work, not by the file.** The source never has
+   to be held in RAM as a whole; a sparse, quote-aware index of a few KiB
+   per GiB and fixed buffers are what navigation needs, so the index pass
+   measures the same ~35 MiB at 1 GiB and at 10 GiB (warm cache, see the
+   benchmark notes for each operation's conditions). Results (match
+   sets, count tables, lookup tables) take memory in proportion to
+   themselves, never to the file, and the
    design does not change at 100 GiB.
 3. **The investigation is visible and recorded.** The chain of selection
    steps is on screen and in the manifest; it is the same object. A step

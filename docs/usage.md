@@ -43,7 +43,7 @@ gridsift gen     --profile narrow --size 10G -o narrow-10g.csv   # synthetic dat
 | `verify` | Verify an exported file (and its source, if present) against its manifest and report the scope — `output+source` when the source was found and matched, `output-only` otherwise; `--require-source` turns a missing source into a failure; `--source PATH` says where the evidence is now; exit code 1 on mismatch |
 | `count` | Count records with a full quote-aware scan, writing nothing |
 | `hash` | Compute digests of any file |
-| `gen` | Generate a deterministic synthetic dataset (`--profile narrow\|wide\|quotes\|ragged\|demo`, `--size` or `--rows`, `--seed`); `demo` is `narrow` with only reserved `.example` / `.test` hosts and TEST-NET addresses, so screenshots and demos can never show a real host |
+| `gen` | Generate a deterministic synthetic dataset (`--profile narrow\|wide\|quotes\|ragged\|demo`, `--size` or `--rows`, `--seed`); `demo` is `narrow` with only hosts under the reserved `example.com` / `example.net` / `example.org` and TEST-NET addresses, so screenshots and demos can never show a real host |
 
 ### Export, redaction, enrichment
 
@@ -105,8 +105,8 @@ before it leaves the case boundary.
 
 ### Memory
 
-The source is never loaded into memory. Fixed read buffers and the sparse
-index are what the index pass and record navigation use (about 35 MiB at
+The source never has to be held in RAM as a whole. Fixed read buffers and
+the sparse index are what the index pass and record navigation use (about 35 MiB at
 both 1 GiB and 10 GiB on the reference machine). Searches add a compressed
 bitmap of matching records; counts keep a capped table per worker and
 switch to lossy counting beyond it; lookup tables are loaded whole; the

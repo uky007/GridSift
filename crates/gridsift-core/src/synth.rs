@@ -23,8 +23,9 @@ pub enum Profile {
     /// Like `Narrow` but ~10% of rows have a missing or extra field.
     Ragged,
     /// `Narrow` for demos and screenshots: hosts only under the reserved
-    /// `.example` and `.test` domains, destination addresses only in the
-    /// TEST-NET blocks, so nothing generated can be a real host or address.
+    /// `example.com` / `example.net` / `example.org`, destination addresses
+    /// only in the TEST-NET blocks, so nothing generated can be a real host
+    /// or address.
     Demo,
 }
 
@@ -381,8 +382,9 @@ fn random_domain(rng: &mut ChaCha8Rng) -> String {
     s
 }
 
-/// A host under a reserved, never-registrable domain (RFC 2606 `.example`,
-/// `.test`).
+/// A host under one of the IANA-reserved example domains (`example.com`,
+/// `example.net`, `example.org`): never registrable by anyone else, and
+/// under public suffixes the PSL knows, so domain enrichment still works.
 fn random_demo_domain(rng: &mut ChaCha8Rng) -> String {
     const SYL: [&str; 24] = [
         "ac", "ba", "cor", "da", "el", "fi", "go", "ha", "in", "ju", "ka", "lo", "ma", "ne", "or",
@@ -393,10 +395,10 @@ fn random_demo_domain(rng: &mut ChaCha8Rng) -> String {
     for _ in 0..n {
         s.push_str(SYL[rng.random_range(0..SYL.len())]);
     }
-    s.push_str(if rng.random_bool(0.7) {
-        ".example"
-    } else {
-        ".test"
+    s.push_str(match rng.random_range(0..3) {
+        0 => ".example.com",
+        1 => ".example.net",
+        _ => ".example.org",
     });
     s
 }
@@ -511,7 +513,9 @@ mod tests {
             );
             let host = f[5];
             assert!(
-                host.ends_with(".example") || host.ends_with(".test"),
+                host.ends_with(".example.com")
+                    || host.ends_with(".example.net")
+                    || host.ends_with(".example.org"),
                 "{host}"
             );
         }

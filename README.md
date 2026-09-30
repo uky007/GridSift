@@ -54,7 +54,7 @@ dependencies, the `dist` profile and where the index cache lives.
 ## Quick usage
 
 The examples use a synthetic proxy log made by the tool itself (the `demo`
-profile only uses reserved example domains and TEST-NET addresses, so
+profile only uses hosts under the IANA-reserved `example.com` / `.net` / `.org` and TEST-NET addresses, so
 nothing in it is a real host or incident), in a scratch directory that
 the repository ignores:
 

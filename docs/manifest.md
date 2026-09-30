@@ -154,9 +154,10 @@ of a full pass.
    renamed into place. Both renames replace atomically.
 
 An interrupted overwrite therefore leaves the previous output and manifest
-intact. The one window that remains — a crash between the two renames —
-leaves a new manifest next to the older output, which `verify` reports as
-a mismatch; there is never an output without a manifest.
+intact as long as the interruption happens before the first rename; the
+one window that remains — a crash between the two renames — leaves a new
+manifest next to the older output, which `verify` reports as a mismatch.
+There is never an output without a manifest.
 
 ## Verification
 

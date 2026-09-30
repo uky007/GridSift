@@ -431,9 +431,9 @@ impl Panel {
 #[derive(Default)]
 pub struct Dashboard {
     pub panels: Vec<Panel>,
-    /// The selection the panels were last computed for, so a new step
-    /// marks them stale.
-    pub key: Option<(usize, bool)>,
+    /// The selection (and enrichment generation) the panels were last
+    /// computed for, so a new step or a changed enrichment marks them stale.
+    pub key: Option<(usize, bool, u64)>,
     /// Counts need recomputing (selection changed, panel added).
     pub stale: bool,
     pub auto_built: bool,

@@ -97,6 +97,12 @@ pub fn dashboard_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Acti
                 .iter()
                 .map(|p| d.column_name(p.column))
                 .collect();
+            let pivotable: Vec<bool> = d
+                .dashboard
+                .panels
+                .iter()
+                .map(|p| p.column < d.header.len())
+                .collect();
             // a plain grid of fixed-size cards, each laid out top-down
             for (row, chunk) in d.dashboard.panels.chunks(cols).enumerate() {
                 ui.horizontal(|ui| {
@@ -109,7 +115,7 @@ pub fn dashboard_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Acti
                             |ui| {
                                 ui.set_width(card_w);
                                 ui.set_height(CARD_HEIGHT);
-                                panel_card(ui, i, panel, &names[i], actions);
+                                panel_card(ui, i, panel, &names[i], pivotable[i], actions);
                             },
                         );
                     }
@@ -211,6 +217,7 @@ fn panel_card(
     index: usize,
     panel: &Panel,
     name: &str,
+    pivotable: bool,
     actions: &mut Vec<Action>,
 ) {
     card_frame().show(ui, |ui| {
@@ -267,11 +274,38 @@ fn panel_card(
             });
             return;
         };
+        if !v.result.exact {
+            ui.label(
+                RichText::new(format!(
+                    "estimated: counts may be under by up to {}",
+                    group_thousands(v.result.error_bound)
+                ))
+                .size(11.0)
+                .color(KHAKI),
+            );
+        }
+        // a click is a search in this column; derived columns cannot be
+        // searched, and a chart being recounted must not answer for the
+        // old selection
+        let clickable = pivotable && !panel.running();
+        if !pivotable {
+            ui.label(
+                RichText::new("derived column: counts only, no click-to-filter")
+                    .size(11.0)
+                    .color(DIM),
+            );
+        } else if panel.running() {
+            ui.label(
+                RichText::new("recounting for the current selection…")
+                    .size(11.0)
+                    .color(DIM),
+            );
+        }
         let clicked = match panel.kind {
-            ChartKind::Pie => pie_chart(ui, &v.rows, v.result.counted, index),
-            ChartKind::Bars => bar_chart(ui, &v.rows, index),
+            ChartKind::Pie => pie_chart(ui, &v.rows, v.result.counted, index, clickable),
+            ChartKind::Bars => bar_chart(ui, &v.rows, index, clickable),
         };
-        if let Some(value) = clicked {
+        if let (Some(value), true) = (clicked, clickable) {
             actions.push(Action::Pivot(panel.column, value));
         }
     });
@@ -283,6 +317,7 @@ fn pie_chart(
     rows: &[(String, u64, f32)],
     total: u64,
     salt: usize,
+    clickable: bool,
 ) -> Option<String> {
     let total = total.max(1);
     let shown: Vec<(&str, u64)> = rows
@@ -292,13 +327,14 @@ fn pie_chart(
         .collect();
     let counted: u64 = shown.iter().map(|(_, c)| c).sum();
     let other = total.saturating_sub(counted);
-    let mut slices: Vec<(String, u64, Color32)> = shown
+    // (label, count, colour, is the "everything else" slice)
+    let mut slices: Vec<(String, u64, Color32, bool)> = shown
         .iter()
         .enumerate()
-        .map(|(i, (v, c))| (v.to_string(), *c, PALETTE[i % PALETTE.len()]))
+        .map(|(i, (v, c))| (v.to_string(), *c, PALETTE[i % PALETTE.len()], false))
         .collect();
     if other > 0 {
-        slices.push(("other".into(), other, Color32::from_gray(80)));
+        slices.push(("other".into(), other, Color32::from_gray(80), true));
     }
 
     let mut clicked = None;
@@ -319,7 +355,7 @@ fn pie_chart(
                 t += TAU;
             }
             let mut a = 0.0f32;
-            slices.iter().position(|(_, c, _)| {
+            slices.iter().position(|(_, c, _, _)| {
                 let span = *c as f32 / total as f32 * TAU;
                 let hit = t >= a && t < a + span;
                 a += span;
@@ -328,7 +364,7 @@ fn pie_chart(
         });
         let painter = ui.painter_at(rect);
         let mut a0 = -PI / 2.0;
-        for (i, (_, count, color)) in slices.iter().enumerate() {
+        for (i, (_, count, color, _)) in slices.iter().enumerate() {
             let span = *count as f32 / total as f32 * TAU;
             let a1 = a0 + span;
             let (ro, color) = if hovered == Some(i) {
@@ -357,7 +393,7 @@ fn pie_chart(
         painter.circle_filled(centre, r_in, Color32::from_gray(28));
         // separators between slices
         let mut a = -PI / 2.0;
-        for (_, count, _) in &slices {
+        for (_, count, _, _) in &slices {
             let span = *count as f32 / total as f32 * TAU;
             painter.line_segment(
                 [
@@ -379,13 +415,13 @@ fn pie_chart(
             CELL_TEXT,
         );
         if let Some(h) = hovered {
-            let (label, count, _) = &slices[h];
+            let (label, count, _, is_other) = &slices[h];
             resp.clone().on_hover_text(format!(
                 "{label}\n{} · {:.1}%",
                 group_thousands(*count),
                 *count as f64 / total as f64 * 100.0
             ));
-            if resp.clicked() && label != "other" {
+            if resp.clicked() && clickable && !is_other {
                 clicked = Some(label.clone());
             }
         }
@@ -394,7 +430,7 @@ fn pie_chart(
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
-            for (i, (label, count, color)) in slices.iter().enumerate() {
+            for (i, (label, count, color, is_other)) in slices.iter().enumerate() {
                 let is_hot = hovered == Some(i);
                 ui.horizontal(|ui| {
                     let (sw, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
@@ -404,7 +440,7 @@ fn pie_chart(
                         .size(11.5)
                         .color(if is_hot { AMBER } else { CELL_TEXT });
                     let r = ui.add(egui::Label::new(text).sense(Sense::click()));
-                    if r.clicked() && label != "other" {
+                    if r.clicked() && clickable && !is_other {
                         clicked = Some(label.clone());
                     }
                     ui.label(
@@ -421,7 +457,12 @@ fn pie_chart(
 }
 
 /// Horizontal bars of the top values; returns the value clicked.
-fn bar_chart(ui: &mut egui::Ui, rows: &[(String, u64, f32)], salt: usize) -> Option<String> {
+fn bar_chart(
+    ui: &mut egui::Ui,
+    rows: &[(String, u64, f32)],
+    salt: usize,
+    clickable: bool,
+) -> Option<String> {
     let rows: Vec<&(String, u64, f32)> = rows.iter().take(BAR_ROWS).collect();
     if rows.is_empty() {
         ui.label(RichText::new("no values").color(DIM));
@@ -479,11 +520,10 @@ fn bar_chart(ui: &mut egui::Ui, rows: &[(String, u64, f32)], salt: usize) -> Opt
             group_thousands(*count),
             share * 100.0
         ));
-        if resp.clicked() {
+        if resp.clicked() && clickable {
             clicked = Some(value.clone());
         }
     }
-    let _ = KHAKI;
     clicked
 }
 

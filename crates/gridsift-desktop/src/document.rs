@@ -391,6 +391,9 @@ pub struct Document {
     /// digest and every selection are stale. Set by [`Document::poll_all`].
     pub source_changed: bool,
     last_source_check: Instant,
+    /// Bumped whenever the enrichment rules change: derived column indexes
+    /// then mean something else, and dashboard counts must be redone.
+    enrichment_gen: u64,
 }
 
 /// Hash-only pass for a sidecar that was built without a digest.
@@ -515,6 +518,7 @@ impl Document {
             digest_job,
             source_changed: false,
             last_source_check: Instant::now(),
+            enrichment_gen: 0,
         })
     }
 
@@ -775,6 +779,20 @@ impl Document {
 
     pub fn start_search(&mut self, ctx: &egui::Context) {
         self.search_ui.error = None;
+        // derived (enrichment) columns are computed per record, not stored;
+        // the scanner matches source fields only, so a search there would
+        // silently select nothing
+        if self
+            .search_ui
+            .column
+            .is_some_and(|c| c >= self.header.len())
+        {
+            self.search_ui.error = Some(
+                "derived columns cannot be searched yet — search the source column they come from"
+                    .into(),
+            );
+            return;
+        }
         let query = self.search_ui.query();
         let compiled = match query.compile(self.params.dialect) {
             Ok(c) => c,
@@ -1109,12 +1127,13 @@ impl Document {
     }
 
     /// Identity of the selection the dashboard reflects.
-    fn dashboard_key(&self) -> (usize, bool) {
+    fn dashboard_key(&self) -> (usize, bool, u64) {
         (
             self.selection
                 .as_ref()
                 .map_or(0, |s| Arc::as_ptr(s) as usize),
             self.search_ui.show_only,
+            self.enrichment_gen,
         )
     }
 
@@ -1168,10 +1187,13 @@ impl Document {
             self.dashboard.key = Some(key);
             self.dashboard.stale = true;
         }
+        // the timeline card exists whenever there is a timestamp column, with
+        // or without value panels
+        let has_content = !self.dashboard.panels.is_empty() || self.timestamp_column().is_some();
         if self.dashboard.stale
             && self.dock_open
             && self.dock_tab == DockTab::Dashboard
-            && !self.dashboard.panels.is_empty()
+            && has_content
             && !self.source_changed
         {
             self.dashboard.stale = false;
@@ -1286,6 +1308,24 @@ impl Document {
         );
         self.cache.clear();
         self.freq = None;
+        // derived columns are renumbered: every derived panel is stale and any
+        // that points past the new set is gone; the generation makes the
+        // dashboard recount even when a column index kept its number
+        self.enrichment_gen += 1;
+        let columns = self.column_count();
+        let source_columns = self.header.len();
+        self.dashboard.panels.retain(|p| p.column < columns);
+        for p in &mut self.dashboard.panels {
+            if p.column >= source_columns {
+                if let Some(j) = &p.job {
+                    j.cancel.store(true, Ordering::Relaxed);
+                }
+                p.job = None;
+                p.view = None;
+                p.error = None;
+            }
+        }
+        self.dashboard.stale = true;
     }
 
     // -- export ------------------------------------------------------------
@@ -1513,4 +1553,137 @@ fn freq_rows(result: &gridsift_core::frequency::FrequencyResult) -> Vec<(String,
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn fixture(name: &str, body: &str) -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("gridsift-desktop-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    /// Drive the document until every background job has finished.
+    fn settle(d: &mut Document) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            d.poll_all();
+            if d.build.is_none()
+                && d.profile_job.is_none()
+                && d.digest_job.is_none()
+                && !d.selection_running()
+                && !d.dashboard.running()
+                && d.timeline_job.is_none()
+                && d.freq_job.is_none()
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "background work timed out");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn open(path: &Path) -> (egui::Context, Document) {
+        let ctx = egui::Context::default();
+        let mut d = Document::open(&ctx, path).expect("open fixture");
+        // never publish a test index into the user's cache directory
+        d.sidecar = None;
+        settle(&mut d);
+        (ctx, d)
+    }
+
+    const HOSTS: &str = "ts,host,alternate_host\n\
+2026-09-21T14:13:20Z,alpha.example.com,alpha.example.org\n\
+2026-09-21T14:13:21Z,alpha.example.com,alpha.example.org\n\
+2026-09-21T14:13:22Z,beta.example.com,beta.example.org\n\
+2026-09-21T14:13:23Z,beta.example.com,beta.example.org\n";
+
+    fn with_domain_panel() -> (egui::Context, Document, usize) {
+        let (ctx, mut d) = open(&fixture("hosts.csv", HOSTS));
+        d.enrich_ui.rules = vec![EnrichRule {
+            column: 1,
+            name: "host".into(),
+            provider: Provider::Domain,
+        }];
+        d.apply_enrichment();
+        let derived = d.header.len();
+        assert_eq!(d.column_name(derived), "host.registrable");
+        d.add_panel(derived);
+        settle(&mut d);
+        let rows = &d.dashboard.panels[0].view.as_ref().unwrap().rows;
+        assert_eq!(rows[0].0, "example.com");
+        (ctx, d, derived)
+    }
+
+    /// A file with nothing but a timestamp column still gets its timeline.
+    #[test]
+    fn timestamp_only_dashboard_starts_the_timeline() {
+        let p = fixture(
+            "timestamps.csv",
+            "ts\n2026-09-21T14:13:20Z\n2026-09-21T14:13:21Z\n2026-09-21T15:13:22Z\n2026-09-21T15:13:23Z\n",
+        );
+        let (_, mut d) = open(&p);
+        assert_eq!(d.timestamp_column(), Some(0));
+        d.open_dashboard();
+        settle(&mut d);
+        assert!(d.dashboard.panels.is_empty());
+        assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
+    }
+
+    /// Clicking a value of a derived column must not run a search over the
+    /// source columns (which would select nothing); it is refused.
+    #[test]
+    fn derived_column_pivot_is_refused_not_wrong() {
+        let (ctx, mut d, derived) = with_domain_panel();
+        d.search_ui.column = Some(derived);
+        d.search_ui.pattern = "example.com".into();
+        d.search_ui.exact = true;
+        d.search_ui.show_only = true;
+        d.start_search(&ctx);
+        settle(&mut d);
+        assert!(d.selection.is_none());
+        assert!(
+            d.search_ui
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("derived"))
+        );
+        // the same click on the source column works
+        d.search_ui.column = Some(1);
+        d.search_ui.pattern = "alpha.example.com".into();
+        d.start_search(&ctx);
+        settle(&mut d);
+        assert_eq!(d.selection.as_ref().unwrap().count(), 2);
+    }
+
+    /// Changing the enrichment renumbers derived columns: the panel's counts
+    /// follow the new meaning of its column, never the old one.
+    #[test]
+    fn enrichment_change_recounts_derived_panels() {
+        let (_, mut d, derived) = with_domain_panel();
+        d.enrich_ui.rules = vec![EnrichRule {
+            column: 2,
+            name: "alternate_host".into(),
+            provider: Provider::Domain,
+        }];
+        d.apply_enrichment();
+        // the old counts are gone immediately …
+        assert!(d.dashboard.panels[0].view.is_none());
+        settle(&mut d);
+        // … and the recount is for the new column
+        assert_eq!(d.column_name(derived), "alternate_host.registrable");
+        let rows = &d.dashboard.panels[0].view.as_ref().unwrap().rows;
+        assert_eq!(rows[0].0, "example.org");
+        // removing the enrichment removes the panel that pointed at it
+        d.enrich_ui.rules.clear();
+        d.apply_enrichment();
+        assert!(d.dashboard.panels.is_empty());
+    }
 }

@@ -37,7 +37,7 @@ written and fit in RAM). Profile `narrow` (13 columns, ~222 B/row, quoted
 user-agent field), seed 1. Its hosts and addresses are random strings and
 random public-looking addresses — good for load, but they can resemble real
 names, so screenshots and demos use the `demo` profile (same shape, reserved
-`.example` / `.test` hosts, TEST-NET addresses) instead.
+`example.com` / `.net` / `.org` hosts, TEST-NET addresses) instead.
 
 | Size | Records | `info` first rows | `index` (+SHA-256) | index size | `rows` far jump | `count` scan | peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|---:|
