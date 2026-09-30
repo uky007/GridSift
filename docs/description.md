@@ -23,10 +23,12 @@ the comparison with existing tools is in [survey.md](survey.md).
 
 - **Evidence-safe.** The source is opened read-only and never rewritten.
   Its SHA-256 is computed on open; every derived artefact is tied to it.
-- **Bounded memory.** The source is never loaded into memory. Navigation
-  needs a sparse, quote-aware record index (a few KiB per GiB) and fixed
-  read buffers, so the index pass runs in the same ~35 MiB at 1 GiB and at
-  10 GiB. What does grow is proportional to results, not to the file:
+- **Bounded memory.** The source never has to be held in RAM as a whole:
+  it is read through a read-only mapping and positioned reads. Navigation
+  needs a sparse, quote-aware record index (a few KiB per GiB — it grows
+  with the record count, but slowly) and fixed read buffers, so the index
+  pass runs in the same ~35 MiB at 1 GiB and at 10 GiB. What does grow is
+  proportional to results, not to the file:
   match sets (a compressed bitmap of matching records), value-count tables
   (capped, then lossy), and lookup tables, which are loaded whole. The
   desktop application adds its row cache and UI (roughly 200–300 MiB on the
@@ -55,7 +57,7 @@ the comparison with existing tools is in [survey.md](survey.md).
 | Dashboard | Charts chosen from the column profile — timeline, pies for low-cardinality columns, top-value bars for hosts / addresses / ports — counted over the current selection and recounted when it changes; a click on a slice or bar is the next selection step; panels can be added, switched and removed |
 | Semantic typing | Columns labelled as timestamp, ipv4/ipv6, ip:port, mac, domain, url, email, md5/sha1/sha256, uuid, port, http_status, integer, float, boolean, categorical or text, with confidence, from a sample across the file; annotations only, values are never converted |
 | Offline enrichment | GeoIP / ASN from an imported MMDB, registrable domain / public suffix / subdomain from the bundled Public Suffix List, joins against local CSV lookup tables; derived columns appear in the grid, in counts and in exports |
-| Export | Selected records written as their exact source bytes (or redacted / enriched variants) to a new file, with a provenance manifest next to it; the manifest is published first, then the output, both by atomic rename, so no output ever exists without its provenance and an interrupted overwrite keeps the previous artefact |
+| Export | Selected records written as their exact source bytes (or redacted / enriched variants) to a new file, with a provenance manifest next to it; the manifest is published first, then the output, each by an atomic rename, so no output ever exists without a manifest (the pair is not one transaction — an interruption between the renames is detectable by `verify`) |
 | Evidence protection | Every write target — output, manifest, index sidecar and their temporaries — is checked against the source (by path and by file identity) before anything is created; the source's identity (size, mtime) is re-checked before a scan and before an export is published |
 | Redaction | Per-column drop, mask, partial, IP-prefix and HMAC pseudonymisation; untouched columns keep their bytes; the policy — never the key — goes into the manifest |
 | Verification | `gridsift verify` re-hashes the output and the source against the manifest and states its scope: `output+source` when the source was present and matched, `output-only` otherwise; `--require-source` makes the latter a failure |

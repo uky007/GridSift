@@ -34,16 +34,16 @@ activities (operations) → entity (output)* — not a full PROV document.
       "matches": 483485
     },
     {
-      "op": "search",
-      "query": { "pattern": "10.5.65.5", "kind": "exact",
-                 "case_insensitive": false, "columns": [1], "invert": false },
-      "matches": 4120
-    },
-    {
       "op": "time_range",
       "column": 0, "name": "timestamp",
       "from": "2026-09-22T14:00:00Z", "to": "2026-09-22T16:00:00Z",
       "matches": 12331, "reference_year": 2026
+    },
+    {
+      "op": "search",
+      "query": { "pattern": "10.5.65.5", "kind": "exact",
+                 "case_insensitive": false, "columns": [1], "invert": false },
+      "matches": 4120
     },
     {
       "op": "enrich",
@@ -69,7 +69,7 @@ activities (operations) → entity (output)* — not a full PROV document.
       ] }
     }
   ],
-  "selection": { "kind": "matches", "records": 12331 },
+  "selection": { "kind": "matches", "records": 4120 },
   "output": {
     "path": "/cases/2026-0917/findings/beacon-1400-1600.csv",
     "name": "beacon-1400-1600.csv",
@@ -77,8 +77,8 @@ activities (operations) → entity (output)* — not a full PROV document.
     "content": "records-redacted-enriched",
     "header": true,
     "terminator": "\n",
-    "records": 12331,
-    "size": 2210488,
+    "records": 4120,
+    "size": 741020,
     "sha256": "5decb233886da7e09eb57a286b079efc879b2e945e99c76b2074b3b24829380d",
     "blake3": null
   }
@@ -168,14 +168,19 @@ gridsift verify findings/beacon-1400-1600.csv --skip-source
 ```
 
 `verify` re-hashes the output and, unless `--skip-source` is given, the
-source (at the manifest's path or at `--source`), compares both against the
-manifest, and prints the operations so the reader can see what the output
-claims to be. It states its **scope**: `output+source` when the source was
-found and matched — the output is then a verified derivation of that
-evidence — or `output-only` when the source was skipped or not found. Any
-mismatch exits with code 1; with `--require-source`, so does a missing
-source. In `--json` output the same appears as `scope` and
-`source_checked`.
+source (at the manifest's path or at `--source`), compares their sizes and
+digests with the ones recorded in the manifest, and prints the operations
+so the reader can see what the output claims to be. It states its
+**scope**: `output+source` when the source was found and matched, or
+`output-only` when the source was skipped or not found. Any mismatch exits
+with code 1; with `--require-source`, so does a missing source. In `--json`
+output the same appears as `scope` and `source_checked`.
+
+What a successful `output+source` check establishes is exactly this: the
+two files on disk are the ones the manifest describes. It does not re-run
+the recorded operations to show that this output follows from that source
+(the queries are recorded so that a reader can), and it does not establish
+that the manifest itself is authentic — manifests are unsigned.
 
 ## What the manifest does not claim
 

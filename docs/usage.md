@@ -43,7 +43,7 @@ gridsift gen     --profile narrow --size 10G -o narrow-10g.csv   # synthetic dat
 | `verify` | Verify an exported file (and its source, if present) against its manifest and report the scope — `output+source` when the source was found and matched, `output-only` otherwise; `--require-source` turns a missing source into a failure; `--source PATH` says where the evidence is now; exit code 1 on mismatch |
 | `count` | Count records with a full quote-aware scan, writing nothing |
 | `hash` | Compute digests of any file |
-| `gen` | Generate a deterministic synthetic dataset (`--profile narrow\|wide\|quotes\|ragged`, `--size` or `--rows`, `--seed`) |
+| `gen` | Generate a deterministic synthetic dataset (`--profile narrow\|wide\|quotes\|ragged\|demo`, `--size` or `--rows`, `--seed`); `demo` is `narrow` with only reserved `.example` / `.test` hosts and TEST-NET addresses, so screenshots and demos can never show a real host |
 
 ### Export, redaction, enrichment
 
@@ -88,9 +88,11 @@ see [manifest.md](manifest.md).
   `--no-header`, `-d` and `--no-quote` get their own sidecar, so the same
   explicit options give the same records with or without a cache.
 
-An export publishes the manifest first and then the output, each by
-atomic rename, so the destination never holds an output without its
-provenance, and an interrupted overwrite leaves the previous files intact.
+An export publishes the manifest first and then the output, each by an
+atomic rename, so the destination never holds an output without a
+manifest. The pair is not one transaction: an interruption between the
+two renames leaves the new manifest next to the previous output, which
+`verify` reports as a mismatch (see [manifest.md](manifest.md)).
 
 ### Before sharing a manifest
 

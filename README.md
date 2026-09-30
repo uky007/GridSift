@@ -16,12 +16,12 @@ application for Linux, macOS and Windows.
 
 - **Evidence-safe** -- The source is opened read-only and never rewritten.
   Its SHA-256 is computed on open; every derived artefact is tied to it.
-- **Bounded memory** -- The source is never loaded into memory: a sparse,
-  quote-aware record index (a few KiB per GiB) plus fixed read buffers is
-  all that navigation needs, so the index pass runs in the same ~35 MiB at
-  1 GiB and at 10 GiB. Match sets and lookup tables grow with the matches
-  and the tables, not with the file (details and conditions in
-  [bench/README.md](bench/README.md)).
+- **Bounded memory** -- The source never has to be held in RAM as a
+  whole: a sparse, quote-aware record index (a few KiB per GiB) plus fixed
+  read buffers is what navigation needs, so the index pass runs in the same
+  ~35 MiB at 1 GiB and at 10 GiB. Match sets and lookup tables grow with
+  the matches and the tables, not with the file (measured operations and
+  conditions in [bench/README.md](bench/README.md)).
 - **Strictly offline** -- No telemetry, no update checks, no DNS.
   Enrichment (GeoIP / ASN, domain classification, lookups) uses only local
   datasets the analyst imports, each identified by hash.
@@ -53,8 +53,15 @@ dependencies, the `dist` profile and where the index cache lives.
 
 ## Quick usage
 
+The examples use a synthetic proxy log made by the tool itself (the `demo`
+profile only uses reserved example domains and TEST-NET addresses, so
+nothing in it is a real host or incident), in a scratch directory that
+the repository ignores:
+
 ```
-gridsift gen  --profile narrow --size 1G -o proxy.csv   # synthetic proxy log, seed 1
+export PATH="$PWD/target/release:$PATH"
+mkdir -p demo && cd demo
+gridsift gen  --profile demo --size 200M -o proxy.csv   # synthetic proxy log, seed 1
 gridsift info proxy.csv                                  # dialect + first rows, no scan
 gridsift index proxy.csv                                 # sparse index + SHA-256, one pass
 gridsift search proxy.csv '/c2/beacon' -c path -n 5      # literal, one column, all cores
@@ -62,8 +69,7 @@ gridsift search proxy.csv -r 'deny,"curl/[0-9.]+"'       # regex
 gridsift freq proxy.csv -c dst_port -s '/c2/beacon'      # top values over the matches
 gridsift timeline proxy.csv -c timestamp -b 1h           # records per hour
 gridsift profile proxy.csv                               # ipv4, domain, sha256, timestamp, …
-gridsift export proxy.csv -o beacon.csv -s '/c2/beacon' -c path \
-    --redact user=hmac --redact user_agent=drop --domain host --hmac-key-file key.txt
+gridsift export proxy.csv -o beacon.csv -s '/c2/beacon' -c path --domain host
 gridsift verify beacon.csv                               # re-hash output and source against the manifest
 ```
 
@@ -71,6 +77,11 @@ gridsift verify beacon.csv                               # re-hash output and so
 gridsift-desktop proxy.csv                               # or drag & drop onto the window
 gridsift-desktop proxy.csv --search '/c2/beacon' --dashboard
 ```
+
+Redaction with a key (`--redact user=hmac --hmac-key-file KEY`) is shown
+in [docs/usage.md](docs/usage.md); keep the key outside the repository
+(`*.key` is ignored) and never in the manifest, which records only its
+fingerprint.
 
 See [docs/usage.md](docs/usage.md) for every option, `jq` recipes and the
 desktop walkthrough.
@@ -114,6 +125,10 @@ desktop walkthrough.
 
 ## Screenshots
 
+All screenshots show synthetic data from `gridsift gen`: the hosts,
+addresses, users and `/c2/beacon` paths are generated, and no real
+incident, host or indicator appears in them.
+
 ### Dashboard: charts built from the column types, following the selection
 
 ![gridsift dashboard](images/gridsift-dashboard.png)
@@ -135,7 +150,8 @@ desktop walkthrough.
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | Error (input not found or unreadable, invalid arguments) — for `verify`, a digest mismatch |
+| 1 | Error while running (input not found or unreadable, refused write, index or scan failure) — for `verify`, a digest mismatch or a required source that is missing |
+| 2 | Command-line usage error (unknown option, missing argument), reported by the argument parser |
 
 ## Docs
 

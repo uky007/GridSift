@@ -9,3 +9,7 @@
 # local review reports stay out of the public tree
 /reviews/
 .claude/
+# demo runs (datasets, exports, manifests, HMAC keys) live here, never in the tree
+/demo/
+*.key
+.env

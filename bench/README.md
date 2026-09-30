@@ -34,7 +34,10 @@ python3 -c "import csv,sys; csv.field_size_limit(1<<30); print(sum(1 for _ in cs
 Machine: Apple M1 Max (10 cores), 32 GB RAM, internal NVMe, macOS 26.6.2,
 Rust 1.93 release build (`lto = "fat"`). **Warm page cache** (files were just
 written and fit in RAM). Profile `narrow` (13 columns, ~222 B/row, quoted
-user-agent field), seed 1.
+user-agent field), seed 1. Its hosts and addresses are random strings and
+random public-looking addresses — good for load, but they can resemble real
+names, so screenshots and demos use the `demo` profile (same shape, reserved
+`.example` / `.test` hosts, TEST-NET addresses) instead.
 
 | Size | Records | `info` first rows | `index` (+SHA-256) | index size | `rows` far jump | `count` scan | peak RSS |
 |---:|---:|---:|---:|---:|---:|---:|---:|
@@ -166,8 +169,9 @@ the column has.
 | desktop: count of the derived `host.registrable` column | 0.44 s |
 
 GeoIP lookups against a real MMDB were not benchmarked here (no database is
-bundled); the `maxminddb` reader does a lookup in about a microsecond, so
-the cost is dominated by the same scan.
+bundled). Expectation, not measurement: an MMDB lookup is on the order of a
+microsecond, which would leave the scan dominant; the number belongs in
+this table once a real database has been run.
 
 ### Timeline (1 GiB, warm cache, 10 threads)
 

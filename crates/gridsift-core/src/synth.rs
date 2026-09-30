@@ -22,14 +22,19 @@ pub enum Profile {
     Quotes,
     /// Like `Narrow` but ~10% of rows have a missing or extra field.
     Ragged,
+    /// `Narrow` for demos and screenshots: hosts only under the reserved
+    /// `.example` and `.test` domains, destination addresses only in the
+    /// TEST-NET blocks, so nothing generated can be a real host or address.
+    Demo,
 }
 
 impl Profile {
-    pub const ALL: [Profile; 4] = [
+    pub const ALL: [Profile; 5] = [
         Profile::Narrow,
         Profile::Wide,
         Profile::Quotes,
         Profile::Ragged,
+        Profile::Demo,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -38,6 +43,7 @@ impl Profile {
             Profile::Wide => "wide",
             Profile::Quotes => "quotes",
             Profile::Ragged => "ragged",
+            Profile::Demo => "demo",
         }
     }
 }
@@ -50,7 +56,7 @@ impl FromStr for Profile {
             .copied()
             .find(|p| p.name() == s)
             .ok_or_else(|| {
-                format!("unknown profile {s:?}; expected one of narrow, wide, quotes, ragged")
+                format!("unknown profile {s:?}; expected one of narrow, wide, quotes, ragged, demo")
             })
     }
 }
@@ -86,7 +92,15 @@ pub struct Generator {
 impl Generator {
     pub fn new(profile: Profile, seed: u64) -> Generator {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let domains = (0..2000).map(|_| random_domain(&mut rng)).collect();
+        let domains = (0..2000)
+            .map(|_| {
+                if profile == Profile::Demo {
+                    random_demo_domain(&mut rng)
+                } else {
+                    random_domain(&mut rng)
+                }
+            })
+            .collect();
         let users = (0..500).map(|i| format!("user{i:04}")).collect();
         Generator {
             profile,
@@ -127,7 +141,7 @@ impl Generator {
     /// Header line (with trailing `\n`).
     pub fn header(&self) -> String {
         match self.profile {
-            Profile::Narrow | Profile::Ragged => {
+            Profile::Narrow | Profile::Ragged | Profile::Demo => {
                 "timestamp,src_ip,dst_ip,dst_port,proto,host,path,status,bytes,user,action,user_agent,sha256\n".to_string()
             }
             Profile::Wide => {
@@ -148,7 +162,7 @@ impl Generator {
     /// Append one row (with terminator) to `out`.
     pub fn write_row(&mut self, out: &mut Vec<u8>) {
         match self.profile {
-            Profile::Narrow => self.narrow_row(out, false),
+            Profile::Narrow | Profile::Demo => self.narrow_row(out, false),
             Profile::Ragged => self.narrow_row(out, true),
             Profile::Wide => self.wide_row(out),
             Profile::Quotes => self.quotes_row(out),
@@ -214,13 +228,18 @@ impl Generator {
     }
 
     fn narrow_row(&mut self, out: &mut Vec<u8>, ragged: bool) {
+        let demo = self.profile == Profile::Demo;
         let rng = &mut self.rng;
         self.clock += rng.random_range(0..3);
         write_iso8601(out, self.clock);
         out.push(b',');
         write_internal_ip(out, rng);
         out.push(b',');
-        write_public_ip(out, rng);
+        if demo {
+            write_testnet_ip(out, rng);
+        } else {
+            write_public_ip(out, rng);
+        }
         out.push(b',');
         let port: u16 = match rng.random_range(0..10) {
             0..=5 => 443,
@@ -362,6 +381,34 @@ fn random_domain(rng: &mut ChaCha8Rng) -> String {
     s
 }
 
+/// A host under a reserved, never-registrable domain (RFC 2606 `.example`,
+/// `.test`).
+fn random_demo_domain(rng: &mut ChaCha8Rng) -> String {
+    const SYL: [&str; 24] = [
+        "ac", "ba", "cor", "da", "el", "fi", "go", "ha", "in", "ju", "ka", "lo", "ma", "ne", "or",
+        "pa", "qu", "ra", "so", "ta", "ul", "va", "wi", "zo",
+    ];
+    let n = rng.random_range(2..5);
+    let mut s = String::new();
+    for _ in 0..n {
+        s.push_str(SYL[rng.random_range(0..SYL.len())]);
+    }
+    s.push_str(if rng.random_bool(0.7) {
+        ".example"
+    } else {
+        ".test"
+    });
+    s
+}
+
+/// An address in one of the three IANA TEST-NET blocks (RFC 5737), which
+/// are never routed.
+fn write_testnet_ip(out: &mut Vec<u8>, rng: &mut ChaCha8Rng) {
+    const BLOCKS: [&[u8]; 3] = [b"192.0.2.", b"198.51.100.", b"203.0.113."];
+    out.extend_from_slice(BLOCKS[rng.random_range(0..BLOCKS.len())]);
+    push_int(out, rng.random_range(1u8..255));
+}
+
 fn write_internal_ip(out: &mut Vec<u8>, rng: &mut ChaCha8Rng) {
     out.extend_from_slice(b"10.");
     push_int(out, rng.random_range(0u8..16));
@@ -444,6 +491,32 @@ pub fn write_iso8601(out: &mut Vec<u8>, secs: u64) {
 mod tests {
     use super::*;
     use crate::scan::{ScanConfig, scan_all};
+
+    /// The demo profile can never name a real host or address.
+    #[test]
+    fn demo_profile_uses_reserved_names_and_addresses() {
+        let mut out = Vec::new();
+        Generator::new(Profile::Demo, 3)
+            .generate(&mut out, Target::Rows(2000), None)
+            .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        for line in text.lines().skip(1) {
+            let f: Vec<&str> = line.split(',').collect();
+            let dst = f[2];
+            assert!(
+                dst.starts_with("192.0.2.")
+                    || dst.starts_with("198.51.100.")
+                    || dst.starts_with("203.0.113."),
+                "{dst}"
+            );
+            let host = f[5];
+            assert!(
+                host.ends_with(".example") || host.ends_with(".test"),
+                "{host}"
+            );
+        }
+        assert_eq!("demo".parse::<Profile>().unwrap(), Profile::Demo);
+    }
 
     #[test]
     fn iso8601() {

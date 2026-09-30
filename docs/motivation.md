@@ -37,14 +37,16 @@ possibly on another machine, possibly by someone else.
 
 ## What goes wrong today
 
-Every widely used answer fails on at least one of the four constraints
-that this situation imposes: *size*, *interactivity*, *evidence handling*
-and *no network*.
+The situation imposes four constraints at once — *size*, *interactivity*,
+*evidence handling* and *no network* — and the common answers are each
+built around one or two of them. The table is about the combination
+gridsift is built for, not a verdict on the tools (each does its own job
+well; [survey.md](survey.md) has the sourced details).
 
 | approach | what breaks |
 |---|---|
 | Spreadsheets (Excel, LibreOffice Calc) | 1,048,576-row limit; a 30-day proxy log is 50× that. Opening a subset means someone already cut the evidence with another tool |
-| Log viewers (klogg, glogg, lnav, …) | handle the size, but are line-oriented: a quoted field with an embedded newline is two "lines"; regex search is possible, pivoting (top values, a time histogram, "only the rows of this host") is not |
+| Log viewers (klogg, glogg, lnav, …) | handle the size, but are line-oriented: a quoted field with an embedded newline is two "lines"; they search well (regex; lnav can also query with SQLite), but pivoting inside one view — top values, a time histogram, "only the rows of this host" — and a record of what was done are not what they are for |
 | Large-file text editors with a CSV mode (EmEditor) | handle the size and the CSV structure — EmEditor's CSV mode understands newlines inside cells and has filter, sort and pivot tables — but it is a Windows-only, proprietary *editor*: the file is something to change, and nothing records what was derived from it |
 | Command-line CSV tools (qsv, xsv, xan, Miller, csvkit) | fast and correct on huge files, and gridsift borrows from them — but the loop of *look → refine → look* becomes a sequence of commands whose intermediate files are copies of evidence with no provenance |
 | Loading into a database or a notebook (DuckDB, SQLite, pandas) | powerful, but it converts the evidence into another form; the link between a result and the original bytes is the analyst's memory. Notebooks are also not something most responders keep on an engagement laptop |

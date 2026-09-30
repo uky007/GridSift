@@ -317,7 +317,8 @@ enum Cmd {
         /// Output file (overwritten if it exists)
         #[arg(long, short = 'o')]
         output: PathBuf,
-        /// Row shape
+        /// Row shape: narrow, wide, quotes, ragged, or demo (like narrow, but
+        /// only reserved example hosts and TEST-NET addresses — for demos)
         #[arg(long, short = 'p', default_value = "narrow")]
         profile: Profile,
         /// Number of rows (mutually exclusive with --size)
@@ -1824,8 +1825,9 @@ fn cmd_verify(
         (if ok { "ok" } else { "MISMATCH" }, Some(sha))
     };
     // What this run actually established: with the source present and
-    // matching, the output is a verified derivation of that evidence; with
-    // the source skipped or absent, only the output's own digest was checked.
+    // matching, both files are the ones the manifest describes (nothing is
+    // replayed and the manifest itself is not authenticated); with the
+    // source skipped or absent, only the output was checked.
     let source_checked = source_status == "ok";
     let scope = if source_checked {
         "output+source"

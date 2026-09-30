@@ -8,8 +8,9 @@ number in [../bench/README.md](../bench/README.md) where one applies.
 
 The go / no-go criteria for the whole project:
 
-1. Open a 100 GB-class CSV with bounded memory — **implemented**; measured
-   to 10 GiB (peak RSS 10.4 MiB, identical at 1 and 10 GiB); the 100 GB
+1. Open a 100 GB-class CSV with bounded memory — **engine implemented,
+   100 GB not yet measured**: measured to 10 GiB (index pass ~35 MiB with
+   the digest, ~10 MiB without, the same at 1 and 10 GiB); the 100 GB
    cold-cache run is pending external storage.
 2. First rows in under 2 s — **implemented** (milliseconds, via the
    bootstrap index).
@@ -54,9 +55,10 @@ The go / no-go criteria for the whole project:
 - **Share-safe manifest variant**: relative paths and hashed query terms
   for a manifest that leaves the case boundary, next to the complete one
   that stays with the case.
-- **Project hygiene for a public repository**: CONTRIBUTING, SECURITY,
-  CHANGELOG, a CI job on the minimum supported Rust version, locked
-  dependencies for release builds.
+- **Project hygiene for a public repository**: CONTRIBUTING, SECURITY and
+  the MSRV CI job exist; still to do — CHANGELOG, locked dependencies for
+  release builds, a secret scan of the final history before the switch to
+  public.
 - **UTF-16 / encoding handling** and compressed input (`.gz`).
 - **Packaging**: `cargo install`, signed macOS / Windows builds, a Linux
   AppImage or static binary; a release workflow.

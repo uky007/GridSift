@@ -7,10 +7,13 @@ issue, not just a defect.
 ## Reporting
 
 Please report vulnerabilities privately through GitHub's *Report a
-vulnerability* form on this repository (Security → Advisories) rather than
-in a public issue. Include the version or commit, the platform, and the
-steps or files that reproduce the problem. You will get an acknowledgement
-within a week; fixes are published as a new release with the advisory.
+vulnerability* form on this repository (Security → Advisories; the form
+is available once the repository is public and private vulnerability
+reporting is switched on in its settings) rather than in a public issue.
+Include the version or commit, the platform, and the steps or files that
+reproduce the problem. This is a small, volunteer-maintained project:
+reports are acknowledged as soon as possible, and fixes are published as
+a new release together with the advisory.
 
 ## In scope
 

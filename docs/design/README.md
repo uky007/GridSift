@@ -4,9 +4,11 @@ Status: implemented in `crates/gridsift-desktop` (2026-09-28); `mock-v1.html`
 next to this file is the static mock the implementation was checked against.
 Deviations from the proposal are listed at the end.
 
-## What the current shell gets wrong
+## What the v0 shell got wrong (historical)
 
-The v0 shell grew feature by feature. It works, but:
+This section is the proposal's starting point, kept for the record: it
+describes the v0 shell that preceded this design, not the current
+application. The v0 shell grew feature by feature. It worked, but:
 
 1. **The top panel is a pile.** Four rows of controls (file bar, evidence
    facts, search, count/timeline) plus badges take a third of the window
