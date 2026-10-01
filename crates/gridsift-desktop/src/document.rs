@@ -1052,10 +1052,29 @@ impl Document {
         let Some(p) = &self.profile else { return };
         let mut picks: Vec<(usize, ChartKind, u8)> = Vec::new();
         for c in &p.columns {
+            // a column that names a verdict or a protocol is what an analyst
+            // charts first, whatever its cardinality
+            let verdict = matches!(
+                c.name.to_ascii_lowercase().as_str(),
+                "label"
+                    | "labels"
+                    | "verdict"
+                    | "action"
+                    | "result"
+                    | "severity"
+                    | "status"
+                    | "proto"
+                    | "protocol"
+                    | "class"
+                    | "category"
+            );
             let (kind, priority) = match c.detected {
                 SemanticType::Boolean => (ChartKind::Pie, 1),
-                SemanticType::Categorical | SemanticType::HttpStatus if c.distinct <= 6 => {
+                SemanticType::Categorical | SemanticType::HttpStatus if c.distinct <= 8 => {
                     (ChartKind::Pie, 1)
+                }
+                SemanticType::Categorical | SemanticType::HttpStatus if verdict => {
+                    (ChartKind::Bars, 1)
                 }
                 SemanticType::Categorical | SemanticType::HttpStatus if c.distinct <= 60 => {
                     (ChartKind::Bars, 3)
@@ -1093,7 +1112,7 @@ impl Document {
         }
         let kind = match self.profile.as_ref().and_then(|p| p.column(column)) {
             Some(c)
-                if c.distinct <= 6
+                if c.distinct <= 8
                     && matches!(
                         c.detected,
                         SemanticType::Categorical

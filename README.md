@@ -145,6 +145,14 @@ incident, host or indicator appears in them.
 
 ![gridsift export](images/gridsift-export.png)
 
+### On real traffic: the thirteen CTU-13 botnet captures as one 4.9 GB file
+
+Twenty million labelled flows (CC BY 2.0, García et al. 2014), the
+`From-Botnet` flows selected, charts following the selection. The
+investigation with its known answers is in [docs/demo.md](docs/demo.md).
+
+![gridsift dashboard on CTU-13](images/demo-ctu13-dashboard.png)
+
 ## Exit codes
 
 | Code | Meaning |
