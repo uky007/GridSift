@@ -14,7 +14,11 @@ router captured everything; the published bidirectional NetFlows carry a
 `Label` per flow: *Background*, *Normal*, or *Botnet* (with the botnet
 labels naming the traffic kind, e.g. `flow=From-Botnet-V42-TCP-CC`).
 
-- Licence: **CC BY 2.0** (the dataset's README). Cite:
+- Licence: **CC BY 2.0** (https://creativecommons.org/licenses/by/2.0/), as
+  stated in the dataset's README
+  (https://mcfp.felk.cvut.cz/publicDatasets/CTU-13-Dataset/README.html).
+  The data, and the screenshots of it in this repository, stay under that
+  licence; see the NOTICE file. Cite:
   S. García, M. Grill, J. Stiborek, A. Zunino, *An empirical comparison of
   botnet detection methods*, Computers & Security 45 (2014) 100–123.
 - Dataset page: https://www.stratosphereips.org/datasets-ctu13 ; files:
@@ -52,8 +56,10 @@ from the dataset paper.)
 ### Enrichment data
 
 **DB-IP Lite** (https://db-ip.com/db/lite.php), the September 2026
-editions, CC BY 4.0 — attribution *"IP Geolocation by DB-IP"* is required
-wherever results are shown. No registration is needed:
+editions, CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). DB-IP
+asks that results be attributed to DB-IP — a web application links back
+from the page that shows them — and suggests the wording *"IP Geolocation
+by DB-IP"*. No registration is needed:
 
 | file | size | SHA-256 |
 |---|---:|---|
@@ -62,7 +68,8 @@ wherever results are shown. No registration is needed:
 
 ## Getting the data
 
-Everything goes into the repository's ignored `demo/` directory:
+Everything goes into the repository's ignored `demo/` directory, and every
+command block in this document runs from inside it:
 
 ```
 export PATH="$PWD/target/release:$PATH"
@@ -99,7 +106,7 @@ the published files (the paper's 2014 table differs slightly for some
 scenarios because the labels were refined afterwards). Every file parsed
 with 0 malformed records and 100 % of timestamps.
 
-| scenario | SHA-256 of the flow file | records | botnet | normal | first … last `StartTime` (UTC) |
+| scenario | SHA-256 of the flow file | records | botnet | normal | first … last `StartTime` (as recorded) |
 |---:|---|---:|---:|---:|---|
 | 1 | `e9d2d3c5adc6ea61e9149fdb12ad49a3aa84d296da9bacd0da07e95a05d43912` | 2,824,636 | 40,961 | 30,258 | 08-10 09:46:53 … 15:54:07 |
 | 2 | `1236bb60d922c72e0b002792ce92ab3156dbbdab0765080a16ce86484fd27a8c` | 1,808,122 | 20,941 | 9,082 | 08-11 09:49:35 … 14:01:11 |
@@ -115,6 +122,13 @@ with 0 malformed records and 100 % of timestamps.
 | 12 | `d669dbef76f4f45d9e69aab1be1c623d7327c1c765657c60e587df4a36913e21` | 325,471 | 2,168 | 7,615 | 08-19 10:02:43 … 11:45:43 |
 | 13 | `10448d328d0b59a60d2ba4c06c26a947bfe6e43d0bdddbcf9b75235d8fb4153a` | 1,925,149 | 40,003 | 31,779 | 08-15 17:13:40 … 08-16 09:36:00 |
 
+`StartTime` in the flow files carries no time zone. gridsift takes naive
+timestamps as UTC, so what it displays — and what this table shows — is the
+file's value unchanged. The dataset's own scenario READMEs give capture
+times in local time (scenario 11's says CEST), so these are not UTC
+wall-clock times; a demo that compares them with other clocks must
+normalise the zone first.
+
 Scenario 11 (Rbot, 16 minutes) is the quick one for a rehearsal; scenario
 1 (Neris, 6 hours, 696 MB) is the one for the video.
 
@@ -126,8 +140,7 @@ nearly twenty million flows over ten days, which is what the "larger than
 a spreadsheet, larger than RAM on a small laptop" story needs:
 
 ```
-cd demo/ctu13
-( head -1 botnet-42.csv; for n in 42 43 44 45 46 54 47 48 49 50 51 52 53; do tail -n +2 botnet-$n.csv; done ) > ctu13-all.csv
+( cd ctu13 && { head -1 botnet-42.csv; for n in 42 43 44 45 46 54 47 48 49 50 51 52 53; do tail -n +2 botnet-$n.csv; done; } > ctu13-all.csv )
 ```
 
 (`botnet-NN.csv` being the thirteen `.binetflow.2format` files named by

@@ -41,8 +41,8 @@ application for Linux, macOS and Windows.
 Rust 1.88 or newer. From crates.io:
 
 ```
-cargo install gridsift            # command-line tool
-cargo install gridsift-desktop    # desktop application
+cargo install gridsift --locked            # command-line tool
+cargo install gridsift-desktop --locked    # desktop application
 ```
 
 Or build from source:
@@ -109,7 +109,8 @@ desktop walkthrough.
 - **Dashboard** -- charts picked from what the columns hold: a timeline for
   the timestamp column, pies for protocol / action / status, top-value
   bars for hosts, addresses and ports. They follow the current selection,
-  and a click on a slice or bar is the next selection step.
+  and a click on a slice or bar of a source column is the next selection
+  step; derived enrichment columns are counted only.
 - **Value counts and timeline** -- top-N per column (exact, then lossy with
   a stated bound), records per time bucket with drag-to-select ranges.
 - **Semantic typing** -- columns labelled ipv4, domain, sha256, timestamp,
@@ -132,9 +133,10 @@ desktop walkthrough.
 
 ## Screenshots
 
-All screenshots show synthetic data from `gridsift gen`: the hosts,
-addresses, users and `/c2/beacon` paths are generated, and no real
-incident, host or indicator appears in them.
+The first four screenshots show synthetic data from `gridsift gen`: the
+hosts, addresses, users and `/c2/beacon` paths are generated, and no real
+incident, host or indicator appears in them. The last one shows public
+research data that stays under its own licence.
 
 ### Dashboard: charts built from the column types, following the selection
 
@@ -154,9 +156,13 @@ incident, host or indicator appears in them.
 
 ### On real traffic: the thirteen CTU-13 botnet captures as one 4.9 GB file
 
-Twenty million labelled flows (CC BY 2.0, García et al. 2014), the
-`From-Botnet` flows selected, charts following the selection. The
-investigation with its known answers is in [docs/demo.md](docs/demo.md).
+Twenty million labelled flows from the CTU-13 dataset (Stratosphere
+Laboratory, Czech Technical University in Prague; [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/),
+García et al. 2014), with the `From-Botnet` flows selected and the charts
+following the selection. The addresses are the dataset's own, and the data
+in this image stays under the dataset's licence, not the project's (see
+[NOTICE](NOTICE)). The investigation with its known answers is in
+[docs/demo.md](docs/demo.md).
 
 ![gridsift dashboard on CTU-13](images/demo-ctu13-dashboard.png)
 
@@ -188,4 +194,5 @@ Dual-licensed under either of
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
-at your option. Third-party licences are listed in [NOTICE](NOTICE).
+at your option. Third-party licences, and the licence of the dataset shown
+in the CTU-13 screenshot, are listed in [NOTICE](NOTICE).

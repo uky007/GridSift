@@ -20,7 +20,7 @@ itoa = "1.0.18"
 maxminddb = { version = "0.32.0", features = ["mmap"] }
 memchr = "2.8.3"
 memmap2 = "0.9.11"
-psl = "2.1.238"
+psl = "=2.1.238"
 rand = "0.10.3"
 rand_chacha = "0.10.0"
 regex = "1.13.1"

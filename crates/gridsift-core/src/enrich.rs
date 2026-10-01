@@ -32,7 +32,10 @@ use crate::scan::scan_all;
 use crate::sys::iso8601_utc;
 
 /// Version of the Public Suffix List snapshot (the `psl` crate release that
-/// carries it). A test checks it against `Cargo.lock`.
+/// carries it). The dependency is pinned exactly to this version in
+/// Cargo.toml, so every build — including `cargo install`, which resolves
+/// dependencies afresh — compiles the list this constant names; a test
+/// checks the pin and the lockfile against it.
 pub const PSL_VERSION: &str = "2.1.238";
 
 /// Identity of a local dataset used for enrichment; recorded in manifests.
@@ -789,16 +792,73 @@ mod tests {
         assert!(LookupTable::load(&lookup_csv(), "nope", &[]).is_err());
     }
 
+    /// The PSL snapshot recorded in manifests is identified by the `psl`
+    /// crate version, so Cargo.toml must pin that crate exactly (a caret
+    /// requirement would let `cargo install` resolve a newer list than the
+    /// one recorded), and the pin and the lockfile must match
+    /// `PSL_VERSION` — in the workspace and in the packaged crate alike.
     #[test]
-    fn psl_version_matches_lockfile() {
-        let lock =
-            fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")).unwrap();
-        let lock = lock.replace('\r', ""); // CRLF checkouts on Windows
+    fn psl_version_is_pinned_and_matches_lockfile() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = fs::read_to_string(dir.join("Cargo.toml")).unwrap();
+        let want = format!("={PSL_VERSION}");
+        assert_eq!(
+            psl_requirement(&manifest.replace('\r', "")).as_deref(),
+            Some(want.as_str()),
+            "Cargo.toml must pin psl exactly to PSL_VERSION ({want})"
+        );
+        // The packaged crate carries its own Cargo.lock; the workspace keeps
+        // one at its root.
+        let lock = [dir.join("Cargo.lock"), dir.join("../../Cargo.lock")]
+            .into_iter()
+            .find(|p| p.is_file())
+            .expect("no Cargo.lock next to the crate or at the workspace root");
+        let lock = fs::read_to_string(lock).unwrap().replace('\r', ""); // CRLF checkouts
         let needle = format!("name = \"psl\"\nversion = \"{PSL_VERSION}\"");
         assert!(
             lock.contains(&needle),
             "PSL_VERSION must match the psl crate in Cargo.lock"
         );
+    }
+
+    /// Version requirement of the `psl` dependency in either manifest form:
+    /// `psl = "..."` / `psl = { version = "..." }` in the source tree, or the
+    /// `[dependencies.psl]` table `cargo package` normalises it to.
+    fn psl_requirement(manifest: &str) -> Option<String> {
+        let quoted = |s: &str| -> Option<String> {
+            let start = s.find('"')? + 1;
+            let end = start + s[start..].find('"')?;
+            Some(s[start..end].to_string())
+        };
+        let mut in_table = false;
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_table = line == "[dependencies.psl]";
+                continue;
+            }
+            if in_table {
+                if let Some(rest) = line.strip_prefix("version")
+                    && let Some(rest) = rest.trim_start().strip_prefix('=')
+                {
+                    return quoted(rest);
+                }
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("psl")
+                && let Some(rest) = rest.trim_start().strip_prefix('=')
+            {
+                let rest = rest.trim_start();
+                if rest.starts_with('"') {
+                    return quoted(rest);
+                }
+                if rest.starts_with('{')
+                    && let Some(i) = rest.find("version")
+                {
+                    return quoted(&rest[i..]);
+                }
+            }
+        }
+        None
     }
 
     #[test]

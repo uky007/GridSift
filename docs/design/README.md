@@ -50,7 +50,7 @@ application. The v0 shell grew feature by feature. It worked, but:
 │ SHA-256 b7f…✓ │   [show only matches ✓]                    [× clear]          │
 │ Index ✓ 1.05s ├──────────────────────────────────────────────────────────────┤
 │ Dialect , "   │ #   timestamp           src_ip        dst_ip      host   …   │  grid
-│ Malformed 0   │ 5   2026-09-21T14:13:26Z 10.5.65.5    95.79.45.58 cdn.orlo… │
+│ Malformed 0   │ 5   2026-09-21T14:13:26Z 10.5.65.5    192.0.2.158 cdn.exam… │
 │               │ …                                                            │
 │ COLUMNS       │                                                              │
 │ timestamp  ts │                                                              │

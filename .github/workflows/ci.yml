@@ -44,3 +44,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
       - run: cargo check --workspace --locked
+
+  # what crates.io would receive: package every crate, check that the
+  # archives carry the documents, and run the engine's tests from its
+  # packaged source (the tree layout differs from the workspace)
+  package:
+    name: package (crates.io dry run)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+      - name: per-crate copies of the licence documents match the root
+        run: |
+          for c in crates/*/; do
+            for f in LICENSE-MIT LICENSE-APACHE NOTICE; do cmp "$f" "$c$f"; done
+          done
+      - run: cargo package --workspace --locked
+      - name: every archive carries README, licences, NOTICE and Cargo.lock
+        run: |
+          for a in target/package/*.crate; do
+            echo "== $a"
+            for f in README.md LICENSE-MIT LICENSE-APACHE NOTICE Cargo.lock; do
+              tar tzf "$a" | grep -q "^[^/]*/$f$" || { echo "missing $f"; exit 1; }
+            done
+          done
+      - name: engine tests from the packaged source
+        run: cargo test --locked --manifest-path target/package/gridsift-core-*/Cargo.toml --target-dir target
