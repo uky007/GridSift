@@ -1618,8 +1618,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "egui_plot",
  "gridsift-core",
  "indicatif",
+ "rfd",
  "serde_json",
 ]
 
@@ -1648,19 +1653,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "gridsift-desktop"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "egui",
- "egui_extras",
- "egui_plot",
- "gridsift-core",
- "rfd",
 ]
 
 [[package]]

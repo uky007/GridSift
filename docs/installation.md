@@ -6,14 +6,14 @@ graph needs — the Linux file-dialog backend).
 ## From crates.io
 
 ```
-cargo install gridsift --locked            # the command-line tool
-cargo install gridsift-desktop --locked    # the desktop application (egui)
+cargo install gridsift --locked    # gridsift-desktop (the application) and gridsift (the command line)
 ```
 
 `--locked` builds with the dependency versions the release was tested
-with. Both binaries go into `~/.cargo/bin`. The engine is published separately as
-[`gridsift-core`](https://crates.io/crates/gridsift-core) for use as a
-library. Releases are listed in [CHANGELOG.md](../CHANGELOG.md).
+with. Both binaries go into `~/.cargo/bin`. The engine is published
+separately as [`gridsift-core`](https://crates.io/crates/gridsift-core)
+for use as a library. Releases are listed in
+[CHANGELOG.md](../CHANGELOG.md).
 
 ## Build from source
 
@@ -22,6 +22,9 @@ git clone https://github.com/uky007/GridSift.git
 cd GridSift
 cargo build --release
 ```
+
+`cargo run` starts the desktop application (`cargo run -- file.csv` opens
+a file); the command line is `cargo run --bin gridsift -- …`.
 
 This produces two binaries:
 

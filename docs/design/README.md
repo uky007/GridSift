@@ -1,6 +1,6 @@
 # Desktop UI design — v1
 
-Status: implemented in `crates/gridsift-desktop` (2026-09-28); `mock-v1.html`
+Status: implemented in `crates/gridsift/src/bin/gridsift-desktop` (2026-09-28); `mock-v1.html`
 next to this file is the static mock the implementation was checked against.
 Deviations from the proposal are listed at the end.
 

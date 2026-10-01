@@ -33,16 +33,18 @@ application for Linux, macOS and Windows.
 
 | Interface | Binary | Description |
 |-----------|--------|-------------|
+| **Desktop** | `gridsift-desktop` | The interactive investigation: instant rows, search and pivot with a visible selection lineage, value counts, dashboard and timeline, enrichment, export with redaction. |
 | **CLI** | `gridsift` | Index, search, count, timeline, profile, export, verify; `--json` on every command for scripting and batch use. |
-| **Desktop** | `gridsift-desktop` | The interactive investigation: instant rows, search and pivot with a visible selection lineage, timeline and value counts, enrichment, export with redaction. |
+
+Both binaries come from the one `gridsift` package; the desktop application
+is what `cargo run` starts.
 
 ## Quick install
 
-Rust 1.88 or newer. From crates.io:
+Rust 1.88 or newer. From crates.io, one package installs both binaries:
 
 ```
-cargo install gridsift --locked            # command-line tool
-cargo install gridsift-desktop --locked    # desktop application
+cargo install gridsift --locked    # gridsift-desktop and gridsift
 ```
 
 Or build from source:

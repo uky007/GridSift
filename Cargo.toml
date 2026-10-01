@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# `cargo build` / `cargo run` at the root build the application package
+default-members = ["crates/gridsift"]
 
 [workspace.package]
 version = "0.1.0"

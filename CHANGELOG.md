@@ -7,6 +7,12 @@ that, minor versions may change interfaces and the manifest format.
 
 ## [Unreleased]
 
+### Packaging
+- One package, `gridsift`, now carries both binaries: `cargo install
+  gridsift` installs the desktop application and the command-line tool,
+  and `cargo run` starts the application (`default-run`). The
+  `gridsift-desktop` package is gone; the binary names are unchanged.
+
 ### Desktop (`gridsift-desktop`)
 - The analysis dock opens on *Values*, now the first tab and with its own
   column picker. The dashboard is built from the file-wide profile and
