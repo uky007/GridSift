@@ -5,8 +5,10 @@
 Every command accepts `--json` for machine-readable output and prints
 elapsed time, throughput and peak RSS. Dialect overrides (`-d ,` / `-d tab`,
 `--no-quote`, `--header` / `--no-header`) are accepted wherever a file is
-read. The index sidecar is found in the user cache directory automatically;
-`--index PATH` uses another one.
+read, as is `--names a,b,c`: names for the columns of a file without a
+header (it implies `--no-header`); they resolve `-c`, label the output and
+are recorded in the manifest of an export. The index sidecar is found in
+the user cache directory automatically; `--index PATH` uses another one.
 
 ```
 gridsift info    FILE                     # dialect + first rows, no scan
@@ -146,17 +148,22 @@ gridsift-desktop proxy.csv --search '/c2/beacon' --dashboard
 
 Launch options (`--search PATTERN [--regex]`, `--count COLUMN`,
 `--timeline`, `--dashboard`, `--domain COLUMN`) reproduce a state on
-start; they exist for demos and screenshots.
+start; they exist for demos and screenshots. `--header` / `--no-header`
+and `--names a,b,c` read the file the way the command line would.
 
 ### The window
 
 - **Title bar** — file name, size, and the two badges: *EVIDENCE · READ
   ONLY* and *STRICT OFFLINE*.
 - **Evidence sidebar** — facts only: records, SHA-256 (✔ once computed),
-  index state and time, dialect, malformed counts. Below it every column
-  with its detected type; a click opens the column menu: *Count values ·
-  Timeline · Search in this column · Enrich… · Redact on export…*. Then the
-  active enrichment rules and **Export finding…**.
+  index state and time, dialect, malformed counts. The dialect's *header*
+  / *no header* is a button: it reopens the file reading the first record
+  the other way. Below it every column with its detected type; a click
+  opens the column menu: *Count values · Timeline · Search in this column
+  · Enrich… · Redact on export…*. A file without a header shows *name
+  columns…*, which names its columns (kept by gridsift and recorded in
+  export manifests, never written to the file). Then the active enrichment
+  rules and **Export finding…**.
 - **Command bar** — one search field with *Regex*, *Exact* (whole-field
   match), *Aa* (case-insensitive), *Invert* and a column chip. Under it the
   **selection lineage** as chips, each with its match count:

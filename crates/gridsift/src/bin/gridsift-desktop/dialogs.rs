@@ -189,6 +189,56 @@ pub fn export_window(ctx: &egui::Context, d: &mut Document) {
 }
 
 /// The enrichment dialog: assemble rules, apply them to the document.
+/// Column names for a file without a header. Returns the names to reopen
+/// the file with once the analyst applies them.
+pub fn names_window(ctx: &egui::Context, d: &mut Document) -> Option<Vec<String>> {
+    if !d.names_ui.open {
+        return None;
+    }
+    let mut open = true;
+    let mut applied = None;
+    egui::Window::new("Column names")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(520.0)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.label(
+                RichText::new(
+                    "This file has no header record. Name its columns here, comma-separated and \
+                     in order; a missing name stays col0, col1, … The names live in gridsift and \
+                     in the manifests of exports, never in the source file.",
+                )
+                .color(DIM),
+            );
+            ui.add_space(6.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut d.names_ui.text)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("time,src_user,dst_computer,…"),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Apply").clicked() {
+                    applied = Some(
+                        d.names_ui
+                            .text
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .collect::<Vec<String>>(),
+                    );
+                }
+                if ui.button("Cancel").clicked() {
+                    d.names_ui.open = false;
+                }
+            });
+        });
+    if !open || applied.is_some() {
+        d.names_ui.open = false;
+    }
+    applied
+}
+
 pub fn enrich_window(ctx: &egui::Context, d: &mut Document) {
     if !d.enrich_ui.open {
         return;

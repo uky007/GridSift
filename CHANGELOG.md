@@ -13,6 +13,15 @@ that, minor versions may change interfaces and the manifest format.
   and `cargo run` starts the application (`default-run`). The
   `gridsift-desktop` package is gone; the binary names are unchanged.
 
+### Files without a header
+- The sniffer's reading of the first record can be overridden everywhere:
+  `--header` / `--no-header` on the desktop launch line as on the command
+  line, and a click on *header* / *no header* in the sidebar reopens the
+  file the other way. `--names a,b,c` (command line and desktop launch
+  line) and the sidebar's *name columns…* dialog name the columns of a
+  file without a header; the names resolve `-c` and are recorded in the
+  manifest of every export (`source.dialect.names`), never in the file.
+
 ### Desktop (`gridsift-desktop`)
 - The analysis dock opens on *Values*, now the first tab and with its own
   column picker. The dashboard is built from the file-wide profile and

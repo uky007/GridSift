@@ -347,6 +347,9 @@ struct DialectArgs {
     /// Force the first record to be treated as a header
     #[arg(long)]
     header: bool,
+    /// Column names for a file without a header, comma-separated (implies `--no-header`)
+    #[arg(long, value_name = "NAMES", value_delimiter = ',')]
+    names: Vec<String>,
 }
 
 /// Offline enrichment sources, shared by the commands that can derive columns.
@@ -740,6 +743,9 @@ fn resolve_dialect(src: &Source, args: &DialectArgs) -> Result<(Sniff, Dialect)>
     if args.header {
         d.has_header = true;
     }
+    if !args.names.is_empty() {
+        d.has_header = false;
+    }
     Ok((sn, d))
 }
 
@@ -850,7 +856,7 @@ fn cmd_info(file: &Path, rows: usize, args: &DialectArgs, json: bool) -> Result<
         ..IndexParams::default()
     };
     let idx = bootstrap(&src, params);
-    let header = header_fields(&src, &idx);
+    let header = column_names(&src, &idx, args);
     let recs = locate_records(&src, &idx, 0, rows);
     let elapsed = t0.elapsed();
 
@@ -1065,7 +1071,7 @@ fn cmd_rows(
             "records": records,
         }));
     }
-    if let Some(h) = header_fields(&src, &idx) {
+    if let Some(h) = column_names(&src, &idx, args) {
         println!("{:>10}  {}", "#", render_fields(&h, 24));
     }
     for r in &recs {
@@ -1307,6 +1313,24 @@ fn load_index(
 }
 
 /// Resolve `--column` values (header names or 0-based indexes).
+/// Column names: the header record, or the `--names` given for a file
+/// without one.
+fn column_names<'s>(
+    src: &'s Source,
+    idx: &SparseIndex,
+    args: &DialectArgs,
+) -> Option<Vec<Cow<'s, [u8]>>> {
+    if !args.names.is_empty() {
+        return Some(
+            args.names
+                .iter()
+                .map(|n| Cow::Owned(n.as_bytes().to_vec()))
+                .collect(),
+        );
+    }
+    header_fields(src, idx)
+}
+
 fn resolve_columns(
     specs: &[String],
     header: Option<&[Cow<'_, [u8]>]>,
@@ -1349,7 +1373,7 @@ fn cmd_search(
             "note: no index for this file; searching sequentially (run `gridsift index` first for a parallel search)"
         );
     }
-    let header = header_fields(&src, &idx);
+    let header = column_names(&src, &idx, args);
     let columns = resolve_columns(&o.columns, header.as_deref())?;
     let query = SearchQuery {
         pattern: pattern.to_string(),
@@ -1594,7 +1618,7 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         ..IndexParams::default()
     };
     let idx = ensure_full_index(file, &src, params, o.index_path.clone(), json)?;
-    let header = header_fields(&src, &idx);
+    let header = column_names(&src, &idx, args);
 
     // optional search → selection
     let mut operations = Vec::new();
@@ -1705,13 +1729,15 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
 
     // manifest next to the output, committed before the output itself
     let out_path = std::path::absolute(&o.output).unwrap_or_else(|_| o.output.clone());
+    let mut source_info = SourceInfo::from_source(
+        &src,
+        idx.params.dialect,
+        idx.digests,
+        Some(idx.stats.records),
+    );
+    source_info.dialect.names = (!args.names.is_empty()).then(|| args.names.clone());
     let manifest = Manifest::new(
-        SourceInfo::from_source(
-            &src,
-            idx.params.dialect,
-            idx.digests,
-            Some(idx.stats.records),
-        ),
+        source_info,
         operations,
         selection_info,
         OutputInfo {
@@ -1978,7 +2004,7 @@ fn cmd_profile(
         ..IndexParams::default()
     };
     let (idx, from_index) = load_index(file, &src, params, index_path)?;
-    let header: Vec<String> = match header_fields(&src, &idx) {
+    let header: Vec<String> = match column_names(&src, &idx, args) {
         Some(h) => h.iter().map(|f| field_str(f).into_owned()).collect(),
         None => (0..idx.stats.expected_fields)
             .map(|i| format!("col{i}"))
@@ -2115,7 +2141,7 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
             "note: no index for this file; counting sequentially (run `gridsift index` first for a parallel count)"
         );
     }
-    let header = header_fields(&src, &idx);
+    let header = column_names(&src, &idx, args);
     let enrichment = build_enrichment(&o.enrich, idx.params.dialect, header.as_deref())?;
     let names = all_column_names(header.as_deref(), enrichment.as_ref());
     let column = resolve_columns(std::slice::from_ref(&o.column), Some(&names))?
@@ -2300,7 +2326,7 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
             "note: no index for this file; scanning sequentially (run `gridsift index` first for a parallel scan)"
         );
     }
-    let header = header_fields(&src, &idx);
+    let header = column_names(&src, &idx, args);
     let column = resolve_columns(std::slice::from_ref(&o.column), header.as_deref())?
         .and_then(|c| c.first().copied())
         .expect("one column");

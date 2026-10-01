@@ -25,13 +25,18 @@ use std::time::Duration;
 use eframe::egui::{self, Key, Modifiers};
 use gridsift_core::enrich::{EnrichRule, Provider};
 
-use crate::document::{Document, RuleChoice};
+use crate::document::{Document, OpenOptions, RuleChoice};
 use crate::ui::Action;
 
 /// `gridsift-desktop [FILE] [--search PATTERN] [--regex] [--count COLUMN]
-/// [--domain COLUMN] [--timeline]`
+/// [--domain COLUMN] [--timeline] [--dashboard] [--header | --no-header]
+/// [--names a,b,c]`
 struct Launch {
     file: Option<PathBuf>,
+    /// Read the first record as a header / as data; `None` asks the sniffer.
+    header: Option<bool>,
+    /// Column names for a file without a header.
+    names: Option<Vec<String>>,
     search: Option<String>,
     regex: bool,
     count: Option<usize>,
@@ -46,6 +51,8 @@ struct Launch {
 fn parse_args() -> Launch {
     let mut l = Launch {
         file: None,
+        header: None,
+        names: None,
         search: None,
         regex: false,
         count: None,
@@ -67,6 +74,13 @@ fn parse_args() -> Launch {
                 .extend(args.next().and_then(|c| c.parse::<usize>().ok())),
             "--timeline" => l.timeline = true,
             "--dashboard" => l.dashboard = true,
+            "--header" => l.header = Some(true),
+            "--no-header" => l.header = Some(false),
+            "--names" => {
+                l.names = args
+                    .next()
+                    .map(|s| s.split(',').map(|n| n.trim().to_string()).collect())
+            }
             "--export-dialog" => l.export_dialog = true,
             "--enrich-dialog" => l.enrich_dialog = true,
             _ if l.file.is_none() => l.file = Some(PathBuf::from(a)),
@@ -96,7 +110,11 @@ fn main() -> Result<(), eframe::Error> {
             cc.egui_ctx.set_theme(egui::Theme::Dark);
             let mut app = App::default();
             if let Some(p) = &launch.file {
-                app.open(&cc.egui_ctx, p);
+                let opts = OpenOptions {
+                    header: launch.header,
+                    names: launch.names.clone(),
+                };
+                app.open_with(&cc.egui_ctx, p, opts);
                 if let Some(d) = &mut app.doc {
                     if !launch.domain.is_empty() {
                         for &c in &launch.domain {
@@ -145,8 +163,12 @@ struct App {
 
 impl App {
     fn open(&mut self, ctx: &egui::Context, path: &Path) {
+        self.open_with(ctx, path, OpenOptions::default());
+    }
+
+    fn open_with(&mut self, ctx: &egui::Context, path: &Path, opts: OpenOptions) {
         self.close();
-        match Document::open(ctx, path) {
+        match Document::open_with(ctx, path, opts) {
             Ok(d) => {
                 self.doc = Some(d);
                 self.error = None;
@@ -178,6 +200,38 @@ impl App {
             match a {
                 Action::OpenDialog => self.open_dialog(ctx),
                 Action::CloseDocument => self.close(),
+                // the index is keyed by the header setting, so a different
+                // reading of the first record means reopening the file
+                Action::ToggleHeader => {
+                    if let Some(d) = &self.doc {
+                        let path = d.path.clone();
+                        let opts = OpenOptions {
+                            header: Some(!d.params.dialect.has_header),
+                            names: d.names.clone(),
+                        };
+                        self.open_with(ctx, &path, opts);
+                    }
+                }
+                Action::NameColumns => {
+                    if let Some(d) = &mut self.doc {
+                        d.names_ui.text = d
+                            .names
+                            .clone()
+                            .unwrap_or_else(|| d.header.clone())
+                            .join(",");
+                        d.names_ui.open = true;
+                    }
+                }
+                Action::SetNames(names) => {
+                    if let Some(d) = &self.doc {
+                        let path = d.path.clone();
+                        let opts = OpenOptions {
+                            header: Some(false),
+                            names: Some(names),
+                        };
+                        self.open_with(ctx, &path, opts);
+                    }
+                }
                 other => {
                     if let Some(d) = &mut self.doc {
                         apply_to_document(ctx, d, other);
@@ -190,7 +244,11 @@ impl App {
 
 fn apply_to_document(ctx: &egui::Context, d: &mut Document, action: Action) {
     match action {
-        Action::OpenDialog | Action::CloseDocument => {}
+        Action::OpenDialog
+        | Action::CloseDocument
+        | Action::ToggleHeader
+        | Action::NameColumns
+        | Action::SetNames(_) => {}
         Action::Find => {
             if !d.search_ui.pattern.is_empty() {
                 d.start_search(ctx);
@@ -287,6 +345,9 @@ impl eframe::App for App {
                     .show(ctx, |ui| ui::grid(ui, d));
                 dialogs::export_window(ctx, d);
                 dialogs::enrich_window(ctx, d);
+                if let Some(names) = dialogs::names_window(ctx, d) {
+                    actions.push(Action::SetNames(names));
+                }
             }
             None => {
                 egui::CentralPanel::default().show(ctx, ui::empty_state);

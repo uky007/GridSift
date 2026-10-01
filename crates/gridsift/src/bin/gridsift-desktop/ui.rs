@@ -42,6 +42,12 @@ pub enum Action {
     /// Filter to a time range of `column`.
     FilterRange(usize, i64, i64),
     GoTo(u64),
+    /// Reopen the file reading the first record the other way (header ↔ data).
+    ToggleHeader,
+    /// Open the column-naming dialog (files without a header).
+    NameColumns,
+    /// Reopen the file with these column names and no header.
+    SetNames(Vec<String>),
     /// Show the dashboard (built from the profile the first time).
     Dashboard,
     /// Rebuild the dashboard from the column profile.
@@ -118,7 +124,7 @@ pub fn sidebar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                 .id_salt("sidebar-scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    evidence_section(ui, d);
+                    evidence_section(ui, d, &mut actions);
                     columns_section(ui, d, &mut actions);
                     enrichment_section(ui, d, &mut actions);
                     ui.add_space(12.0);
@@ -138,7 +144,7 @@ pub fn sidebar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
     actions
 }
 
-fn evidence_section(ui: &mut egui::Ui, d: &Document) {
+fn evidence_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
     let (records, complete, mismatches, lenient, unterminated, sha) = {
         let idx = d.index.read().expect("index lock");
         (
@@ -207,17 +213,39 @@ fn evidence_section(ui: &mut egui::Ui, d: &Document) {
             };
             theme::fact(ui, "Index", index_text);
             let dl = d.params.dialect;
-            theme::fact(
-                ui,
-                "Dialect",
-                RichText::new(format!(
-                    "{:?} {} {}",
-                    dl.delimiter as char,
-                    dl.quote
-                        .map_or("no-quote".to_string(), |q| format!("{:?}", q as char)),
-                    if dl.has_header { "header" } else { "no header" }
-                )),
-            );
+            ui.label(RichText::new("Dialect").color(DIM));
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{:?} {}",
+                        dl.delimiter as char,
+                        dl.quote
+                            .map_or("no-quote".to_string(), |q| format!("{:?}", q as char)),
+                    ))
+                    .monospace(),
+                );
+                // the sniffer's reading of the first record, flippable: the
+                // file is reopened (its index is keyed by this setting)
+                let (label, hint) = if dl.has_header {
+                    (
+                        "header",
+                        "the first record is the header — click to reopen treating it as data",
+                    )
+                } else {
+                    (
+                        "no header",
+                        "the first record is data — click to reopen treating it as the header",
+                    )
+                };
+                if ui
+                    .small_button(RichText::new(label).monospace())
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    actions.push(Action::ToggleHeader);
+                }
+            });
+            ui.end_row();
             let cols = if d.derived_names.is_empty() {
                 format!("{}", d.header.len())
             } else {
@@ -256,6 +284,20 @@ fn evidence_section(ui: &mut egui::Ui, d: &Document) {
 
 fn columns_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
     theme::section(ui, "COLUMNS");
+    if !d.params.dialect.has_header {
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("name columns…")
+                .on_hover_text("names for a file without a header; exports record them")
+                .clicked()
+            {
+                actions.push(Action::NameColumns);
+            }
+            if d.names.is_some() {
+                ui.label(RichText::new("named").color(GREEN).size(11.0));
+            }
+        });
+    }
     let n_source = d.header.len();
     for i in 0..d.column_count() {
         let name = d.column_name(i);

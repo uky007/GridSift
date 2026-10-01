@@ -190,6 +190,52 @@ fn exact_search_selects_whole_fields() {
 }
 
 #[test]
+fn names_label_a_headerless_file_and_reach_the_manifest() {
+    let dir = workdir();
+    let csv = dir.join("bare.csv");
+    fs::write(&csv, "1,10.0.0.1\n2,10.0.0.2\n3,10.0.0.1\n").unwrap();
+    // the names resolve `-c`, and the first record is counted as data
+    let v = ok_json(
+        &dir,
+        &["freq", s(&csv), "-c", "ip", "--names", "n,ip", "--json"],
+    );
+    assert_eq!(v["top"][0]["value"], "10.0.0.1");
+    assert_eq!(v["top"][0]["count"], 2);
+    // a file the sniffer would read with a header is read as data with --names
+    let out = dir.join("named.csv");
+    let v = ok_json(
+        &dir,
+        &[
+            "export",
+            s(&csv),
+            "-o",
+            s(&out),
+            "--names",
+            "n,ip",
+            "-s",
+            "10.0.0.1",
+            "-c",
+            "ip",
+            "--json",
+        ],
+    );
+    assert_eq!(v["records"], 2);
+    let m: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("named.csv.manifest.json")).unwrap()).unwrap();
+    assert_eq!(m["source"]["dialect"]["header"], false);
+    assert_eq!(
+        m["source"]["dialect"]["names"],
+        serde_json::json!(["n", "ip"])
+    );
+    // without names the sniffer's reading stands and the manifest says nothing about names
+    let out2 = dir.join("plain.csv");
+    ok_json(&dir, &["export", s(&csv), "-o", s(&out2), "--json"]);
+    let m2: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("plain.csv.manifest.json")).unwrap()).unwrap();
+    assert!(m2["source"]["dialect"].get("names").is_none());
+}
+
+#[test]
 fn export_publishes_output_with_manifest_and_verify_states_its_scope() {
     let dir = workdir();
     let csv = dir.join("src.csv");

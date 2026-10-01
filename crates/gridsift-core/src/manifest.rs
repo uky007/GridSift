@@ -99,6 +99,10 @@ pub struct DialectInfo {
     pub delimiter: String,
     pub quote: Option<String>,
     pub header: bool,
+    /// Column names the analyst gave a file without a header (`--names`);
+    /// absent when the names came from the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names: Option<Vec<String>>,
 }
 
 impl From<Dialect> for DialectInfo {
@@ -107,6 +111,7 @@ impl From<Dialect> for DialectInfo {
             delimiter: (d.delimiter as char).to_string(),
             quote: d.quote.map(|q| (q as char).to_string()),
             header: d.has_header,
+            names: None,
         }
     }
 }

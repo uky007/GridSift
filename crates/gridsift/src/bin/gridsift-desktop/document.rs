@@ -344,12 +344,33 @@ pub enum DockTab {
 // ---------------------------------------------------------------------------
 // the document
 
+/// How to read a file: the sniffer's choices, or the analyst's.
+#[derive(Clone, Debug, Default)]
+pub struct OpenOptions {
+    /// Treat the first record as a header (`Some(true)`) or as data
+    /// (`Some(false)`); `None` leaves it to the sniffer.
+    pub header: Option<bool>,
+    /// Column names for a file without a header (implies no header).
+    pub names: Option<Vec<String>>,
+}
+
+/// The column-naming dialog.
+#[derive(Default)]
+pub struct NamesUi {
+    pub open: bool,
+    pub text: String,
+}
+
 pub struct Document {
     pub path: PathBuf,
     pub source: Arc<Source>,
     pub params: IndexParams,
     pub index: Arc<RwLock<SparseIndex>>,
     pub header: Vec<String>,
+    /// Column names the analyst gave a file without a header; exports
+    /// record them in the manifest.
+    pub names: Option<Vec<String>>,
+    pub names_ui: NamesUi,
     /// Rows known to exist so far (probe, then build progress).
     pub known_rows: u64,
     pub build: Option<BuildJob>,
@@ -409,13 +430,26 @@ pub struct DigestJob {
 }
 
 impl Document {
-    pub fn open(ctx: &egui::Context, path: &Path) -> Result<Document, String> {
+    /// Open a file. `opts` overrides the sniffer's reading: header or not,
+    /// and names for the columns of a file without one.
+    pub fn open_with(
+        ctx: &egui::Context,
+        path: &Path,
+        opts: OpenOptions,
+    ) -> Result<Document, String> {
         let t0 = Instant::now();
         let source = Arc::new(Source::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
         let head = source.slice(0, 1 << 20);
         let sn = sniff(head, source.len());
+        let mut dialect = sn.dialect;
+        if let Some(h) = opts.header {
+            dialect.has_header = h;
+        }
+        if opts.names.is_some() {
+            dialect.has_header = false;
+        }
         let params = IndexParams {
-            dialect: sn.dialect,
+            dialect,
             scan_start: sn.scan_start,
             ..IndexParams::default()
         };
@@ -444,6 +478,19 @@ impl Document {
             None => (0..index.stats.expected_fields)
                 .map(|i| format!("col{i}"))
                 .collect(),
+        };
+        // the analyst's names for a header-less file; gaps keep col<i>
+        let header: Vec<String> = match (&opts.names, params.dialect.has_header) {
+            (Some(names), false) => (0..header.len().max(names.len()))
+                .map(|i| {
+                    names
+                        .get(i)
+                        .filter(|n| !n.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("col{i}"))
+                })
+                .collect(),
+            _ => header,
         };
 
         let mut cache = RowCache::default();
@@ -525,6 +572,8 @@ impl Document {
             source_changed: false,
             last_source_check: Instant::now(),
             enrichment_gen: 0,
+            names: opts.names,
+            names_ui: NamesUi::default(),
         })
     }
 
@@ -1469,6 +1518,7 @@ impl Document {
             cancel.clone(),
             out.clone(),
         );
+        let names = self.names.clone();
         let handle = std::thread::Builder::new()
             .name("gridsift-export".into())
             .spawn(move || {
@@ -1514,13 +1564,15 @@ impl Document {
                     ));
                 }
                 let out_path = std::path::absolute(&out2).unwrap_or_else(|_| out2.clone());
+                let mut source_info = SourceInfo::from_source(
+                    &source,
+                    index.params.dialect,
+                    index.digests,
+                    Some(index.stats.records),
+                );
+                source_info.dialect.names = names;
                 let manifest = Manifest::new(
-                    SourceInfo::from_source(
-                        &source,
-                        index.params.dialect,
-                        index.digests,
-                        Some(index.stats.records),
-                    ),
+                    source_info,
                     operations,
                     match &matches {
                         Some(m) => SelectionInfo::Matches { records: m.len() },
@@ -1688,7 +1740,7 @@ mod tests {
 
     fn open(path: &Path) -> (egui::Context, Document) {
         let ctx = egui::Context::default();
-        let mut d = Document::open(&ctx, path).expect("open fixture");
+        let mut d = Document::open_with(&ctx, path, OpenOptions::default()).expect("open fixture");
         // never publish a test index into the user's cache directory
         d.sidecar = None;
         settle(&mut d);
@@ -1741,6 +1793,41 @@ mod tests {
         assert!(d.dashboard.auto_built);
         assert!(d.dashboard.panels.is_empty());
         assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
+    }
+
+    /// Names given for a header-less file become the column names and the
+    /// first record stays data; forcing a header reads the file the other
+    /// way.
+    #[test]
+    fn names_and_header_override_the_sniffer() {
+        let p = fixture("bare.csv", "1,10.0.0.1\n2,10.0.0.2\n3,10.0.0.3\n");
+        let ctx = egui::Context::default();
+        let opts = OpenOptions {
+            header: None,
+            names: Some(vec!["n".into(), "ip".into()]),
+        };
+        let mut d = Document::open_with(&ctx, &p, opts).unwrap();
+        d.sidecar = None;
+        settle(&mut d);
+        assert!(!d.params.dialect.has_header);
+        assert_eq!(d.header, ["n", "ip"]);
+        assert_eq!(d.index.read().unwrap().stats.records, 3);
+        assert_eq!(
+            d.names.as_deref(),
+            Some(&["n".to_string(), "ip".to_string()][..])
+        );
+
+        let opts = OpenOptions {
+            header: Some(true),
+            names: None,
+        };
+        let mut d = Document::open_with(&ctx, &p, opts).unwrap();
+        d.sidecar = None;
+        settle(&mut d);
+        assert!(d.params.dialect.has_header);
+        assert_eq!(d.header, ["1", "10.0.0.1"]);
+        assert_eq!(d.index.read().unwrap().stats.records, 2);
+        assert!(d.names.is_none());
     }
 
     fn select_host(ctx: &egui::Context, d: &mut Document, host: &str) {
