@@ -21,13 +21,14 @@ pub fn cache_root() -> PathBuf {
         .join("gridsift")
 }
 
-/// Default location of the sparse index for `source` parsed with `dialect`.
+/// File stem and key of `source` parsed with `dialect`: the canonical path
+/// and the parser settings, hashed.
 ///
 /// The dialect is part of the key: an index records where records start,
 /// and that depends on the delimiter, quoting and header settings, so a
 /// file opened with `--no-header` must not pick up the index that was built
-/// with a header.
-pub fn default_index_path(source: &Path, dialect: Dialect) -> io::Result<PathBuf> {
+/// with a header; the same goes for the analyses computed over its records.
+fn sidecar_key(source: &Path, dialect: Dialect) -> io::Result<(String, String)> {
     let canon = fs::canonicalize(source)?;
     let mut keyed = canon.to_string_lossy().into_owned().into_bytes();
     keyed.push(0);
@@ -39,9 +40,31 @@ pub fn default_index_path(source: &Path, dialect: Dialect) -> io::Result<PathBuf
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "source".into());
-    Ok(cache_root()
-        .join("index")
-        .join(format!("{stem}.{key}.gsix")))
+    Ok((stem, key))
+}
+
+/// Location of the sparse index for `source` parsed with `dialect` under
+/// the cache tree `root`.
+pub fn index_path_in(root: &Path, source: &Path, dialect: Dialect) -> io::Result<PathBuf> {
+    let (stem, key) = sidecar_key(source, dialect)?;
+    Ok(root.join("index").join(format!("{stem}.{key}.gsix")))
+}
+
+/// Default location of the sparse index for `source` parsed with `dialect`.
+pub fn default_index_path(source: &Path, dialect: Dialect) -> io::Result<PathBuf> {
+    index_path_in(&cache_root(), source, dialect)
+}
+
+/// Location of the cached whole-file analyses (column profile, value
+/// counts, timelines) of `source` parsed with `dialect` under `root`.
+pub fn analysis_path_in(root: &Path, source: &Path, dialect: Dialect) -> io::Result<PathBuf> {
+    let (stem, key) = sidecar_key(source, dialect)?;
+    Ok(root.join("analysis").join(format!("{stem}.{key}.gsan")))
+}
+
+/// Default location of the cached whole-file analyses of `source`.
+pub fn default_analysis_path(source: &Path, dialect: Dialect) -> io::Result<PathBuf> {
+    analysis_path_in(&cache_root(), source, dialect)
 }
 
 #[cfg(test)]
@@ -76,5 +99,14 @@ mod tests {
         );
         assert!(pa.extension().is_some_and(|e| e == "gsix"));
         assert!(default_index_path(&dir.join("missing.csv"), d).is_err());
+        // the analyses share the key and sit beside the index tree
+        let an = default_analysis_path(&a, d).unwrap();
+        assert!(an.extension().is_some_and(|e| e == "gsan"));
+        assert_eq!(an.file_stem(), pa.file_stem());
+        assert_ne!(an, default_analysis_path(&a, no_header).unwrap());
+        assert_eq!(
+            index_path_in(Path::new("/x"), &a, d).unwrap(),
+            Path::new("/x").join("index").join(pa.file_name().unwrap())
+        );
     }
 }

@@ -368,6 +368,26 @@ pub struct FreqJob {
     pub column: usize,
     /// The selection the count is restricted to, if any.
     pub base: Option<Arc<SelectionNode>>,
+    /// Top values asked for (what the analysis cache keeps).
+    pub top: usize,
+    /// Served from the analysis cache rather than counted.
+    pub cached: bool,
+}
+
+impl FreqJob {
+    /// A whole-file count from the analysis cache: finished before it starts.
+    pub fn cached(result: FrequencyResult, source_len: u64) -> FreqJob {
+        let (column, top) = (result.column, result.top.len());
+        FreqJob {
+            shared: Arc::new(FrequencyShared::new(source_len)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: Some(std::thread::spawn(move || Ok(result))),
+            column,
+            base: None,
+            top,
+            cached: true,
+        }
+    }
 }
 
 pub struct FreqView {
@@ -377,6 +397,8 @@ pub struct FreqView {
     pub rows: Vec<(String, u64, f32)>,
     /// Records in the selection the count was restricted to.
     pub base: Option<u64>,
+    /// Counted in an earlier session over the same bytes.
+    pub cached: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +481,23 @@ pub struct TimelineJob {
     pub column: usize,
     /// The selection the timeline is restricted to, if any.
     pub base: Option<Arc<SelectionNode>>,
+    /// Served from the analysis cache rather than scanned.
+    pub cached: bool,
+}
+
+impl TimelineJob {
+    /// A whole-file timeline from the analysis cache: finished before it starts.
+    pub fn cached(result: TimelineResult, source_len: u64) -> TimelineJob {
+        let column = result.column;
+        TimelineJob {
+            shared: Arc::new(FrequencyShared::new(source_len)),
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: Some(std::thread::spawn(move || Ok(result))),
+            column,
+            base: None,
+            cached: true,
+        }
+    }
 }
 
 pub struct TimelineView {

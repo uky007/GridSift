@@ -69,16 +69,18 @@ console window.
 ## Where gridsift writes
 
 gridsift never writes next to the evidence. The only files it creates on
-its own are index sidecars (`*.gsix`) in the user cache directory:
+its own are index sidecars (`*.gsix`) and analysis caches (`*.gsan`: the
+column profile, whole-file value counts and timelines) in the user cache
+directory:
 
-| platform | index cache |
+| platform | cache directory |
 |---|---|
-| Linux | `$XDG_CACHE_HOME/gridsift/index/` (default `~/.cache/gridsift/index/`) |
-| macOS | `~/Library/Caches/gridsift/index/` |
-| Windows | `%LOCALAPPDATA%\gridsift\index\` |
+| Linux | `$XDG_CACHE_HOME/gridsift/{index,analysis}/` (default `~/.cache/gridsift/`) |
+| macOS | `~/Library/Caches/gridsift/{index,analysis}/` |
+| Windows | `%LOCALAPPDATA%\gridsift\{index,analysis}\` |
 
-A sidecar is bound to the source's size and modification time and is
-ignored when either changes. `gridsift index --index PATH` writes it
+Both are bound to the source's size and modification time (and to its
+SHA-256 once known) and are ignored when the file changes. `gridsift index --index PATH` writes it
 somewhere else instead. Exports and manifests are written only where the
 analyst asks for them.
 

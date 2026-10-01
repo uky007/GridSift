@@ -354,8 +354,8 @@ pub struct ColumnProfile {
 pub struct Profile {
     pub columns: Vec<ColumnProfile>,
     pub sampled_records: u64,
-    /// The sample was drawn from positions across the whole file, not just
-    /// the head.
+    /// The sample was drawn from positions across the whole file (or the
+    /// head was the whole file), not just from the first rows.
     pub spans_file: bool,
 }
 
@@ -559,6 +559,9 @@ pub fn profile(
         let recs = locate_many(source, index, &ordinals);
         spans_file = !recs.is_empty();
         add_records(&recs, &mut accs);
+    } else if index.stats.complete && total <= opts.head_rows as u64 {
+        // the head was the whole file: nothing was left unsampled
+        spans_file = true;
     }
     finish_all(accs, header, n, spans_file)
 }

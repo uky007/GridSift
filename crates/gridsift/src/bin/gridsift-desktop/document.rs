@@ -8,10 +8,11 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use gridsift_core::Source;
+use gridsift_core::analysis::AnalysisCache;
 use gridsift_core::dialect::sniff;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, Selection, export_pending};
-use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
+use gridsift_core::frequency::{FrequencyOptions, FrequencyResult, FrequencyShared, frequency};
 use gridsift_core::hash::{Digests, HashSelection, hash_source, hex};
 use gridsift_core::index::{IndexParams, SparseIndex, bootstrap};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
@@ -23,7 +24,9 @@ use gridsift_core::search::{
     MatchSet, PatternKind, SearchOptions, SearchOutcome, SearchQuery, SearchShared, search,
 };
 use gridsift_core::semantic::{Profile, ProfileOptions, SemanticType, profile, profile_rows};
-use gridsift_core::sidecar::default_index_path;
+use gridsift_core::sidecar::{
+    analysis_path_in, default_analysis_path, default_index_path, index_path_in,
+};
 use gridsift_core::sys::{boost_current_thread, group_thousands, human_bytes};
 use gridsift_core::timeline::{TimelineOptions, current_year, select_time_range, timeline};
 
@@ -352,6 +355,9 @@ pub struct OpenOptions {
     pub header: Option<bool>,
     /// Column names for a file without a header (implies no header).
     pub names: Option<Vec<String>>,
+    /// Root of the cache tree (index sidecars, analysis caches) instead of
+    /// the user's; for tests.
+    pub cache_root: Option<PathBuf>,
 }
 
 /// The column-naming dialog.
@@ -414,6 +420,11 @@ pub struct Document {
 
     /// A cached index without a digest gets one from this pass.
     pub digest_job: Option<DigestJob>,
+    /// Whole-file analyses (profile, counts, timelines) kept between
+    /// sessions in the cache directory; filled as results come in.
+    pub analysis: Option<AnalysisCache>,
+    pub analysis_path: Option<PathBuf>,
+    analysis_dirty: bool,
     /// The source's size or mtime changed after it was opened: the index,
     /// digest and every selection are stale. Set by [`Document::poll_all`].
     pub source_changed: bool,
@@ -456,7 +467,16 @@ impl Document {
 
         // A complete sidecar for this file *and* this dialect means no
         // build is needed; a missing digest is computed separately below.
-        let sidecar = default_index_path(path, params.dialect).ok();
+        let (sidecar, analysis_path) = match &opts.cache_root {
+            Some(root) => (
+                index_path_in(root, path, params.dialect).ok(),
+                analysis_path_in(root, path, params.dialect).ok(),
+            ),
+            None => (
+                default_index_path(path, params.dialect).ok(),
+                default_analysis_path(path, params.dialect).ok(),
+            ),
+        };
         let cached = sidecar
             .as_ref()
             .and_then(|p| SparseIndex::load(p).ok())
@@ -492,6 +512,24 @@ impl Document {
                 .collect(),
             _ => header,
         };
+        // whole-file analyses from an earlier session, if they describe
+        // these very bytes; the profile is by column index, so it takes
+        // the current names
+        let sha = index.digests.sha256.map(|d| hex(&d));
+        let analysis = analysis_path
+            .as_ref()
+            .and_then(|p| AnalysisCache::load_for(p, source.id(), sha.as_deref()));
+        let cached_profile = analysis
+            .as_ref()
+            .and_then(|a| a.profile.clone())
+            .filter(|p| p.spans_file && p.columns.len() == header.len())
+            .map(|mut p| {
+                for (c, name) in p.columns.iter_mut().zip(&header) {
+                    c.name = name.clone();
+                }
+                p
+            });
+        let profile_from_cache = cached_profile.is_some();
 
         let mut cache = RowCache::default();
         let probed = cache.fill_window(&source, &index, None, 0, PROBE_ROWS);
@@ -506,7 +544,7 @@ impl Document {
 
         // With a complete index already on disk there is no build to wait
         // for, so the file-wide profile starts right away.
-        let profile_job = from_sidecar.then(|| {
+        let profile_job = (from_sidecar && !profile_from_cache).then(|| {
             let (s, i, h) = (source.clone(), index.clone(), header.clone());
             std::thread::Builder::new()
                 .name("gridsift-profile".into())
@@ -533,7 +571,7 @@ impl Document {
                 handle: Some(handle),
             }
         });
-        Ok(Document {
+        let mut doc = Document {
             path: path.to_path_buf(),
             source,
             params,
@@ -551,7 +589,7 @@ impl Document {
             selection: None,
             export: None,
             export_ui: ExportUi::default(),
-            profile: Some(quick_profile),
+            profile: Some(cached_profile.unwrap_or(quick_profile)),
             profile_job,
             enrichment: None,
             derived_names: Vec::new(),
@@ -574,7 +612,14 @@ impl Document {
             enrichment_gen: 0,
             names: opts.names,
             names_ui: NamesUi::default(),
-        })
+            analysis,
+            analysis_path,
+            analysis_dirty: false,
+        };
+        if profile_from_cache {
+            doc.auto_build_dashboard();
+        }
+        Ok(doc)
     }
 
     // -- names and columns -------------------------------------------------
@@ -694,6 +739,7 @@ impl Document {
         self.poll_timeline();
         self.poll_dashboard();
         self.poll_export();
+        self.save_analysis(false);
     }
 
     fn poll_digest(&mut self) {
@@ -707,10 +753,15 @@ impl Document {
         self.digest_job = None;
         match handle.join() {
             Ok(Ok(Some(d))) => {
+                let sha = d.sha256.map(|s| hex(&s));
                 let saved = self.index.write().ok().map(|mut w| {
                     w.digests = d;
                     w.clone()
                 });
+                if let (Some(sha), Some(a)) = (sha, &mut self.analysis) {
+                    a.set_sha256(sha);
+                    self.analysis_dirty = true;
+                }
                 if let (Some(idx), Some(p)) = (saved, &self.sidecar)
                     && let Err(e) = idx.save_for(&self.source, p)
                 {
@@ -739,7 +790,9 @@ impl Document {
                 self.known_rows = idx.stats.records;
                 let complete = idx.stats.complete;
                 if complete {
-                    self.spawn_profile(idx.clone());
+                    if !self.profile.as_ref().is_some_and(|p| p.spans_file) {
+                        self.spawn_profile(idx.clone());
+                    }
                     if let Some(p) = &self.sidecar
                         && let Err(e) = idx.save_for(&self.source, p)
                     {
@@ -775,13 +828,69 @@ impl Document {
             && let Some(h) = self.profile_job.take()
             && let Ok(p) = h.join()
         {
-            self.profile = Some(p);
+            self.profile = Some(p.clone());
+            if let Some(a) = self.analysis_mut() {
+                a.put_profile(p);
+            }
             // the dashboard is built from the file-wide profile and counted
             // in the background, so it is ready when its tab is opened
             if !self.dashboard.auto_built {
                 self.auto_build_dashboard();
             }
         }
+    }
+
+    // -- analysis cache ----------------------------------------------------
+
+    /// The cache to record whole-file results in, created on first use;
+    /// none while the source is known to have changed or when there is
+    /// nowhere to keep it. Asking for it marks it dirty.
+    fn analysis_mut(&mut self) -> Option<&mut AnalysisCache> {
+        if self.source_changed || self.analysis_path.is_none() {
+            return None;
+        }
+        let sha = self
+            .index
+            .read()
+            .ok()
+            .and_then(|i| i.digests.sha256.map(|d| hex(&d)));
+        let id = self.source.id();
+        self.analysis_dirty = true;
+        Some(
+            self.analysis
+                .get_or_insert_with(|| AnalysisCache::new(id, sha)),
+        )
+    }
+
+    /// Keep a whole-file count of a source column for the next session.
+    fn remember_count(&mut self, top: usize, result: &FrequencyResult) {
+        if result.column < self.header.len()
+            && let Some(a) = self.analysis_mut()
+        {
+            a.put_count(top, result.clone());
+        }
+    }
+
+    /// Write the analysis cache when something new is in it: once the scans
+    /// are idle, or right away when `now` (closing the file).
+    fn save_analysis(&mut self, now: bool) {
+        if !self.analysis_dirty || self.source_changed {
+            return;
+        }
+        let idle = self.freq_job.is_none()
+            && self.timeline_job.is_none()
+            && !self.dashboard.running()
+            && self.profile_job.is_none();
+        if !(now || idle) {
+            return;
+        }
+        if let (Some(a), Some(p)) = (&self.analysis, &self.analysis_path)
+            && !a.is_empty()
+            && let Err(e) = a.save_for(&self.source, p)
+        {
+            self.status = Some(format!("analysis cache not saved: {e}"));
+        }
+        self.analysis_dirty = false;
     }
 
     // -- selections --------------------------------------------------------
@@ -1018,6 +1127,13 @@ impl Document {
     fn spawn_freq(&self, column: usize, top: usize) -> Option<FreqJob> {
         let index = self.index_snapshot()?;
         let base = self.scan_base();
+        // whole-file counts of source columns come from the analysis cache
+        if base.is_none()
+            && column < self.header.len()
+            && let Some(cached) = self.analysis.as_ref().and_then(|a| a.count(column, top))
+        {
+            return Some(FreqJob::cached(cached, self.source.len()));
+        }
         let shared = Arc::new(FrequencyShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let enrichment = self.enrichment.clone();
@@ -1061,6 +1177,8 @@ impl Document {
             handle: Some(handle),
             column,
             base,
+            top,
+            cached: false,
         })
     }
 
@@ -1072,16 +1190,21 @@ impl Document {
             return;
         }
         let handle = job.handle.take().expect("handle present until joined");
-        let column = job.column;
+        let (column, top, cached) = (job.column, job.top, job.cached);
+        let whole_file = job.base.is_none();
         let base = job.base.as_ref().map(|n| n.count());
         self.freq_job = None;
         match handle.join() {
             Ok(Ok(result)) if result.complete => {
+                if whole_file && !cached {
+                    self.remember_count(top, &result);
+                }
                 self.freq = Some(FreqView {
                     column,
                     rows: freq_rows(&result),
                     result,
                     base,
+                    cached,
                 });
             }
             Ok(Ok(_)) => self.status = Some("count cancelled".into()),
@@ -1109,6 +1232,7 @@ impl Document {
         self.dock_open = true;
         if let Some(c) = self.timestamp_column()
             && self.dashboard_ready()
+            && self.build.is_none()
             && self.timeline_column_in_use() != Some(c)
             && !self.source_changed
             && self.guard_source()
@@ -1304,28 +1428,37 @@ impl Document {
     }
 
     fn poll_dashboard(&mut self) {
+        let mut remember: Vec<(usize, FrequencyResult)> = Vec::new();
         for p in &mut self.dashboard.panels {
             let Some(job) = &mut p.job else { continue };
             if !job.handle.as_ref().is_some_and(|h| h.is_finished()) {
                 continue;
             }
             let handle = job.handle.take().expect("handle present until joined");
-            let column = job.column;
+            let (column, top, cached) = (job.column, job.top, job.cached);
+            let whole_file = job.base.is_none();
             let base = job.base.as_ref().map(|n| n.count());
             p.job = None;
             match handle.join() {
                 Ok(Ok(result)) if result.complete => {
+                    if whole_file && !cached {
+                        remember.push((top, result.clone()));
+                    }
                     p.view = Some(FreqView {
                         column,
                         rows: freq_rows(&result),
                         result,
                         base,
+                        cached,
                     });
                 }
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => p.error = Some(e.to_string()),
                 Err(_) => p.error = Some("count thread panicked".into()),
             }
+        }
+        for (top, result) in remember {
+            self.remember_count(top, &result);
         }
         // a new selection step (or a change of view) makes the counts stale;
         // they are recomputed in the background, on screen or not, so the
@@ -1338,7 +1471,12 @@ impl Document {
         // the timeline card exists whenever there is a timestamp column, with
         // or without value panels
         let has_content = !self.dashboard.panels.is_empty() || self.timestamp_column().is_some();
-        if self.dashboard.stale && self.dashboard_ready() && has_content && !self.source_changed {
+        if self.dashboard.stale
+            && self.dashboard_ready()
+            && has_content
+            && !self.source_changed
+            && self.build.is_none()
+        {
             self.dashboard.stale = false;
             self.refresh_dashboard();
         } else if !self.source_changed {
@@ -1365,6 +1503,22 @@ impl Document {
             return;
         };
         let base = self.scan_base();
+        // the whole-file timeline comes from the analysis cache
+        let reference_year = TimelineOptions::default().reference_year;
+        if base.is_none()
+            && let Some(cached) = self
+                .analysis
+                .as_ref()
+                .and_then(|a| a.timeline(column, reference_year))
+                .cloned()
+        {
+            self.timeline_job = Some(TimelineJob::cached(cached, self.source.len()));
+            if switch {
+                self.dock_tab = DockTab::Timeline;
+                self.dock_open = true;
+            }
+            return;
+        }
         let shared = Arc::new(FrequencyShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (source, s2, c2, b2) = (
@@ -1403,6 +1557,7 @@ impl Document {
             handle: Some(handle),
             column,
             base,
+            cached: false,
         });
         if switch {
             self.dock_tab = DockTab::Timeline;
@@ -1419,10 +1574,14 @@ impl Document {
         }
         let handle = job.handle.take().expect("handle present until joined");
         let column = job.column;
+        let keep = job.base.is_none() && !job.cached;
         let base = job.base.as_ref().map(|n| n.count());
         self.timeline_job = None;
         match handle.join() {
             Ok(Ok(result)) if result.complete => {
+                if keep && let Some(a) = self.analysis_mut() {
+                    a.put_timeline(result.clone());
+                }
                 self.timeline = Some(TimelineView::new(column, result, base))
             }
             Ok(Ok(_)) => self.status = Some("timeline cancelled".into()),
@@ -1647,6 +1806,7 @@ impl Document {
 
     /// Stop every background job (on close).
     pub fn cancel_all(&mut self) {
+        self.save_analysis(true);
         if let Some(j) = &self.build {
             j.cancel.store(true, Ordering::Relaxed);
         }
@@ -1738,13 +1898,19 @@ mod tests {
         }
     }
 
+    /// Open with the cache tree beside the fixture, never the user's.
     fn open(path: &Path) -> (egui::Context, Document) {
         let ctx = egui::Context::default();
-        let mut d = Document::open_with(&ctx, path, OpenOptions::default()).expect("open fixture");
-        // never publish a test index into the user's cache directory
-        d.sidecar = None;
+        let mut d = Document::open_with(&ctx, path, opts_for(path)).expect("open fixture");
         settle(&mut d);
         (ctx, d)
+    }
+
+    fn opts_for(path: &Path) -> OpenOptions {
+        OpenOptions {
+            cache_root: Some(path.parent().unwrap().join("cache")),
+            ..OpenOptions::default()
+        }
     }
 
     const HOSTS: &str = "ts,host,alternate_host\n\
@@ -1805,9 +1971,9 @@ mod tests {
         let opts = OpenOptions {
             header: None,
             names: Some(vec!["n".into(), "ip".into()]),
+            ..opts_for(&p)
         };
         let mut d = Document::open_with(&ctx, &p, opts).unwrap();
-        d.sidecar = None;
         settle(&mut d);
         assert!(!d.params.dialect.has_header);
         assert_eq!(d.header, ["n", "ip"]);
@@ -1820,14 +1986,58 @@ mod tests {
         let opts = OpenOptions {
             header: Some(true),
             names: None,
+            ..opts_for(&p)
         };
         let mut d = Document::open_with(&ctx, &p, opts).unwrap();
-        d.sidecar = None;
         settle(&mut d);
         assert!(d.params.dialect.has_header);
         assert_eq!(d.header, ["1", "10.0.0.1"]);
         assert_eq!(d.index.read().unwrap().stats.records, 2);
         assert!(d.names.is_none());
+    }
+
+    /// Whole-file counts, the timeline and the profile are kept in the cache
+    /// tree: the next open of the same bytes shows them without a scan or a
+    /// profile pass, selections are still counted, and a changed file gets
+    /// nothing from the cache.
+    #[test]
+    fn whole_file_analyses_are_cached_between_opens() {
+        let p = fixture("hosts.csv", HOSTS);
+        let ctx = egui::Context::default();
+        let mut d = Document::open_with(&ctx, &p, opts_for(&p)).unwrap();
+        settle(&mut d);
+        assert!(d.dashboard.auto_built);
+        assert!(!d.dashboard.panels[0].view.as_ref().unwrap().cached);
+        let path = d.analysis_path.clone().unwrap();
+        assert!(path.is_file(), "saved once the scans were idle");
+        drop(d);
+
+        let mut d = Document::open_with(&ctx, &p, opts_for(&p)).unwrap();
+        assert!(
+            d.profile_job.is_none(),
+            "the file-wide profile came from the cache"
+        );
+        assert!(d.dashboard.auto_built, "built from it at once");
+        settle(&mut d);
+        for panel in &d.dashboard.panels {
+            assert!(panel.view.as_ref().unwrap().cached);
+        }
+        assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
+        select_host(&ctx, &mut d, "alpha.example.com");
+        let v = d.dashboard.panels[0].view.as_ref().unwrap();
+        assert!(!v.cached && v.base == Some(2));
+        drop(d);
+
+        std::fs::write(
+            &p,
+            format!("{HOSTS}2026-09-21T14:13:24Z,gamma.example.com,gamma.example.org\n"),
+        )
+        .unwrap();
+        let mut d = Document::open_with(&ctx, &p, opts_for(&p)).unwrap();
+        assert!(d.analysis.is_none(), "other bytes, nothing from the cache");
+        settle(&mut d);
+        assert!(!d.dashboard.panels[0].view.as_ref().unwrap().cached);
+        assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(5));
     }
 
     fn select_host(ctx: &egui::Context, d: &mut Document, host: &str) {

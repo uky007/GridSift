@@ -14,6 +14,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::enrich::Enrichment;
 use crate::export::Selection;
 use crate::index::{Checkpoint, SparseIndex};
@@ -86,14 +88,14 @@ impl FrequencyShared {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrequencyEntry {
     /// The field bytes exactly as stored (unquoted).
     pub value: Vec<u8>,
     pub count: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrequencyResult {
     pub column: usize,
     /// Records in the selection that were examined.

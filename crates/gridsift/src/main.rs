@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use gridsift_core::analysis::AnalysisCache;
 use gridsift_core::dialect::sniff;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, Selection, Terminator, export_pending};
@@ -2011,7 +2012,42 @@ fn cmd_profile(
             .collect(),
     };
     let t0 = Instant::now();
-    let prof = profile_columns(&src, &idx, &header, ProfileOptions::default());
+    // the file-wide profile is kept between runs (by column index: names
+    // given since are applied)
+    let analysis_path = AnalysisCache::default_path(file, idx.params.dialect).ok();
+    let sha = idx.digests.sha256.map(|d| hex(&d));
+    let mut analysis = analysis_path
+        .as_ref()
+        .and_then(|p| AnalysisCache::load_for(p, src.id(), sha.as_deref()));
+    let cached = analysis
+        .as_ref()
+        .and_then(|a| a.profile.clone())
+        .filter(|p| p.spans_file && p.columns.len() == header.len())
+        .map(|mut p| {
+            for (c, name) in p.columns.iter_mut().zip(&header) {
+                c.name = name.clone();
+            }
+            p
+        });
+    let from_cache = cached.is_some();
+    let prof = match cached {
+        Some(p) => p,
+        None => {
+            let p = profile_columns(&src, &idx, &header, ProfileOptions::default());
+            if let Some(path) = &analysis_path
+                && p.spans_file
+            {
+                let a = analysis.get_or_insert_with(|| AnalysisCache::new(src.id(), sha.clone()));
+                a.put_profile(p.clone());
+                if let Err(e) = a.save_for(&src, path)
+                    && !json
+                {
+                    eprintln!("note: analysis cache not saved: {e}");
+                }
+            }
+            p
+        }
+    };
     let elapsed = t0.elapsed();
 
     if json {
@@ -2020,6 +2056,7 @@ fn cmd_profile(
             "sampled_records": prof.sampled_records,
             "spans_file": prof.spans_file,
             "from_index": from_index,
+            "cached": from_cache,
             "columns": prof.columns,
             "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
         }));
@@ -2151,6 +2188,20 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
         .get(column)
         .map(|f| field_str(f).into_owned())
         .unwrap_or_else(|| format!("col{column}"));
+    // whole-file counts of source columns are kept between runs
+    let cacheable = o.search.is_none()
+        && (enrichment.is_none() || header.as_ref().is_some_and(|h| column < h.len()));
+    let analysis_path = if cacheable {
+        AnalysisCache::default_path(file, idx.params.dialect).ok()
+    } else {
+        None
+    };
+    let sha = idx.digests.sha256.map(|d| hex(&d));
+    let mut analysis = analysis_path
+        .as_ref()
+        .and_then(|p| AnalysisCache::load_for(p, src.id(), sha.as_deref()));
+    let cached = analysis.as_ref().and_then(|a| a.count(column, o.top));
+    let from_cache = cached.is_some();
 
     let matches = match &o.search {
         Some(pattern) => Some(search_matches(
@@ -2174,27 +2225,42 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
     };
 
     let shared = FrequencyShared::new(src.len());
-    let opts = FrequencyOptions {
-        column,
-        top: o.top,
-        threads: o.threads,
-        enrichment: enrichment.as_ref(),
-        ..FrequencyOptions::default()
-    };
-    let pb = progress_bar(src.len(), json);
-    let result = std::thread::scope(|s| {
-        let h = s.spawn(|| frequency(&src, &idx, selection, opts, &shared));
-        while !h.is_finished() {
-            pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
-            std::thread::sleep(Duration::from_millis(50));
+    let result = match cached {
+        Some(r) => r,
+        None => {
+            let opts = FrequencyOptions {
+                column,
+                top: o.top,
+                threads: o.threads,
+                enrichment: enrichment.as_ref(),
+                ..FrequencyOptions::default()
+            };
+            let pb = progress_bar(src.len(), json);
+            let result = std::thread::scope(|s| {
+                let h = s.spawn(|| frequency(&src, &idx, selection, opts, &shared));
+                while !h.is_finished() {
+                    pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                h.join().expect("frequency thread")
+            })
+            .context("counting")?;
+            pb.finish_and_clear();
+            if !result.complete {
+                bail!("count did not complete");
+            }
+            if let Some(p) = &analysis_path {
+                let a = analysis.get_or_insert_with(|| AnalysisCache::new(src.id(), sha.clone()));
+                a.put_count(o.top, result.clone());
+                if let Err(e) = a.save_for(&src, p)
+                    && !json
+                {
+                    eprintln!("note: analysis cache not saved: {e}");
+                }
+            }
+            result
         }
-        h.join().expect("frequency thread")
-    })
-    .context("counting")?;
-    pb.finish_and_clear();
-    if !result.complete {
-        bail!("count did not complete");
-    }
+    };
     let rss = peak_rss_bytes();
     let share = |n: u64| {
         if result.counted == 0 {
@@ -2210,6 +2276,7 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
             "column": column,
             "column_name": column_name,
             "search": o.search,
+            "cached": from_cache,
             "counted": result.counted,
             "empty": result.empty,
             "distinct": result.distinct,
@@ -2251,8 +2318,21 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
             share(e.count)
         );
     }
+    let timing = if from_cache {
+        "from the analysis cache".to_string()
+    } else {
+        format!(
+            "{:.2} s, {:.0} MiB/s, {} thread(s)",
+            result.elapsed.as_secs_f64(),
+            mib_per_s(
+                shared.bytes.load(std::sync::atomic::Ordering::Relaxed),
+                result.elapsed
+            ),
+            result.threads
+        )
+    };
     eprintln!(
-        "({} records, {} empty, {} distinct{}; {:.2} s, {:.0} MiB/s, {} thread(s), peak RSS {})",
+        "({} records, {} empty, {} distinct{}; {timing}, peak RSS {})",
         group_thousands(result.counted),
         group_thousands(result.empty),
         group_thousands(result.distinct),
@@ -2264,12 +2344,6 @@ fn cmd_freq(file: &Path, args: &DialectArgs, o: FreqArgs, json: bool) -> Result<
                 group_thousands(result.error_bound)
             )
         },
-        result.elapsed.as_secs_f64(),
-        mib_per_s(
-            shared.bytes.load(std::sync::atomic::Ordering::Relaxed),
-            result.elapsed
-        ),
-        result.threads,
         rss_text(rss)
     );
     Ok(())
@@ -2336,6 +2410,22 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
         .map(|f| field_str(f).into_owned())
         .unwrap_or_else(|| format!("col{column}"));
     let width_spec = parse_bucket(&o.bucket)?;
+    let reference_year = o.year.unwrap_or_else(current_year);
+    // the whole-file timeline is kept between runs
+    let analysis_path = if o.search.is_none() {
+        AnalysisCache::default_path(file, idx.params.dialect).ok()
+    } else {
+        None
+    };
+    let sha = idx.digests.sha256.map(|d| hex(&d));
+    let mut analysis = analysis_path
+        .as_ref()
+        .and_then(|p| AnalysisCache::load_for(p, src.id(), sha.as_deref()));
+    let cached = analysis
+        .as_ref()
+        .and_then(|a| a.timeline(column, reference_year))
+        .cloned();
+    let from_cache = cached.is_some();
 
     let matches = match &o.search {
         Some(pattern) => Some(search_matches(
@@ -2359,26 +2449,41 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
     };
 
     let shared = FrequencyShared::new(src.len());
-    let opts = TimelineOptions {
-        column,
-        threads: o.threads,
-        reference_year: o.year.unwrap_or_else(current_year),
-        ..TimelineOptions::default()
-    };
-    let pb = progress_bar(src.len(), json);
-    let t = std::thread::scope(|s| {
-        let h = s.spawn(|| timeline(&src, &idx, selection, opts, &shared));
-        while !h.is_finished() {
-            pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
-            std::thread::sleep(Duration::from_millis(50));
+    let t = match cached {
+        Some(t) => t,
+        None => {
+            let opts = TimelineOptions {
+                column,
+                threads: o.threads,
+                reference_year,
+                ..TimelineOptions::default()
+            };
+            let pb = progress_bar(src.len(), json);
+            let t = std::thread::scope(|s| {
+                let h = s.spawn(|| timeline(&src, &idx, selection, opts, &shared));
+                while !h.is_finished() {
+                    pb.set_position(shared.bytes.load(std::sync::atomic::Ordering::Relaxed));
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                h.join().expect("timeline thread")
+            })
+            .context("timeline")?;
+            pb.finish_and_clear();
+            if !t.complete {
+                bail!("timeline did not complete");
+            }
+            if let Some(p) = &analysis_path {
+                let a = analysis.get_or_insert_with(|| AnalysisCache::new(src.id(), sha.clone()));
+                a.put_timeline(t.clone());
+                if let Err(e) = a.save_for(&src, p)
+                    && !json
+                {
+                    eprintln!("note: analysis cache not saved: {e}");
+                }
+            }
+            t
         }
-        h.join().expect("timeline thread")
-    })
-    .context("timeline")?;
-    pb.finish_and_clear();
-    if !t.complete {
-        bail!("timeline did not complete");
-    }
+    };
     let width = width_spec.unwrap_or_else(|| t.auto_width(o.max_buckets));
     let buckets = t.rebucket(width);
     let fmt = |secs: i64| {
@@ -2395,6 +2500,7 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
             "column": column,
             "column_name": column_name,
             "search": o.search,
+            "cached": from_cache,
             "counted": t.counted,
             "parsed": t.parsed,
             "unparsed": t.unparsed,
@@ -2420,11 +2526,14 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
         let bar = "█".repeat((count * 40 / max) as usize);
         println!("{}  {:>12}  {bar}", fmt(*start), group_thousands(*count));
     }
+    let timing = if from_cache {
+        "from the analysis cache".to_string()
+    } else {
+        format!("{:.2} s, {} thread(s)", t.elapsed.as_secs_f64(), t.threads)
+    };
     eprintln!(
-        "({} records, {:.2} s, {} thread(s){})",
+        "({} records, {timing}{})",
         group_thousands(t.counted),
-        t.elapsed.as_secs_f64(),
-        t.threads,
         if t.resolution > 1 {
             format!(
                 "; base resolution coarsened to {}",

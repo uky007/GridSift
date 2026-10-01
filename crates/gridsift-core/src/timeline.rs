@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 use std::io;
+
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -391,9 +393,13 @@ impl Buckets {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimelineResult {
     pub column: usize,
+    /// Year assumed for formats without one (part of a cached result's
+    /// identity: the same bytes parse differently in another year).
+    #[serde(default)]
+    pub reference_year: i64,
     /// Records in the selection that were examined.
     pub counted: u64,
     pub parsed: u64,
@@ -562,6 +568,7 @@ pub fn timeline(
     buckets.sort_unstable();
     Ok(TimelineResult {
         column: opts.column,
+        reference_year: opts.reference_year,
         counted: counted.load(Ordering::Relaxed),
         parsed,
         unparsed,

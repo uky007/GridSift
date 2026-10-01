@@ -26,6 +26,7 @@
 //! - [`synth`]   deterministic synthetic datasets for benchmarks
 //! - [`sys`]     process probes and formatting helpers for reports
 
+pub mod analysis;
 pub mod dialect;
 pub mod enrich;
 pub mod export;

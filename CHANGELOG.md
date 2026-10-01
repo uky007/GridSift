@@ -13,6 +13,15 @@ that, minor versions may change interfaces and the manifest format.
   and `cargo run` starts the application (`default-run`). The
   `gridsift-desktop` package is gone; the binary names are unchanged.
 
+### Analysis cache
+- Whole-file results are kept in the user cache directory beside the index
+  sidecar (`*.gsan`): the file-wide column profile, value counts and
+  timelines over all records. The next open of the same bytes — same
+  size, modification time and SHA-256 — shows the dashboard and timeline
+  at once and starts no profile pass; `freq`, `timeline` and `profile`
+  report `cached`. Counts over a selection or of derived columns are
+  always recomputed, and a changed file never uses the cache.
+
 ### Files without a header
 - The sniffer's reading of the first record can be overridden everywhere:
   `--header` / `--no-header` on the desktop launch line as on the command

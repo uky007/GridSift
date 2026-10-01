@@ -190,6 +190,43 @@ fn exact_search_selects_whole_fields() {
 }
 
 #[test]
+fn whole_file_counts_are_served_from_the_analysis_cache_until_the_file_changes() {
+    let dir = workdir();
+    let csv = dir.join("c.csv");
+    fs::write(&csv, "ip,host\n10.0.0.1,a\n10.0.0.2,b\n10.0.0.1,c\n").unwrap();
+    ok_json(&dir, &["index", s(&csv), "--json"]);
+    let first = ok_json(&dir, &["freq", s(&csv), "-c", "ip", "--json"]);
+    assert_eq!(first["cached"], false);
+    assert_eq!(first["top"][0]["count"], 2);
+    let again = ok_json(&dir, &["freq", s(&csv), "-c", "ip", "--json"]);
+    assert_eq!(again["cached"], true);
+    assert_eq!(again["top"], first["top"]);
+    // a narrower request is served, a wider one is counted again
+    assert_eq!(
+        ok_json(&dir, &["freq", s(&csv), "-c", "ip", "-n", "1", "--json"])["cached"],
+        true
+    );
+    // a selection is never served from the cache
+    let sel = ok_json(&dir, &["freq", s(&csv), "-c", "ip", "-s", "a", "--json"]);
+    assert_eq!(sel["cached"], false);
+    assert_eq!(sel["counted"], 1);
+    // the profile too, and the timeline
+    assert_eq!(
+        ok_json(&dir, &["profile", s(&csv), "--json"])["cached"],
+        false
+    );
+    assert_eq!(
+        ok_json(&dir, &["profile", s(&csv), "--json"])["cached"],
+        true
+    );
+    // a changed file gets nothing from the cache
+    fs::write(&csv, "ip,host\n10.0.0.1,a\n10.0.0.2,b\n10.0.0.2,c\n").unwrap();
+    let changed = ok_json(&dir, &["freq", s(&csv), "-c", "ip", "--json"]);
+    assert_eq!(changed["cached"], false);
+    assert_eq!(changed["top"][0]["value"], "10.0.0.2");
+}
+
+#[test]
 fn names_label_a_headerless_file_and_reach_the_manifest() {
     let dir = workdir();
     let csv = dir.join("bare.csv");

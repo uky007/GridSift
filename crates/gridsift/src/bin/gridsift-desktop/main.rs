@@ -113,6 +113,7 @@ fn main() -> Result<(), eframe::Error> {
                 let opts = OpenOptions {
                     header: launch.header,
                     names: launch.names.clone(),
+                    cache_root: None,
                 };
                 app.open_with(&cc.egui_ctx, p, opts);
                 if let Some(d) = &mut app.doc {
@@ -208,6 +209,7 @@ impl App {
                         let opts = OpenOptions {
                             header: Some(!d.params.dialect.has_header),
                             names: d.names.clone(),
+                            cache_root: None,
                         };
                         self.open_with(ctx, &path, opts);
                     }
@@ -228,6 +230,7 @@ impl App {
                         let opts = OpenOptions {
                             header: Some(false),
                             names: Some(names),
+                            cache_root: None,
                         };
                         self.open_with(ctx, &path, opts);
                     }

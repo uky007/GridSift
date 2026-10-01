@@ -9,6 +9,9 @@ read, as is `--names a,b,c`: names for the columns of a file without a
 header (it implies `--no-header`); they resolve `-c`, label the output and
 are recorded in the manifest of an export. The index sidecar is found in
 the user cache directory automatically; `--index PATH` uses another one.
+Whole-file results are kept there too: `freq` and `timeline` without `-s`
+and `profile` answer from the analysis cache the second time (`cached`
+in their output) and a file that changed never uses it.
 
 ```
 gridsift info    FILE                     # dialect + first rows, no scan
@@ -185,7 +188,10 @@ and `--names a,b,c` read the file the way the command line would.
   (the full column profile).
 - **Dashboard** — built from the file-wide column profile as soon as that
   is in and counted in the background, so it is ready when the tab is
-  opened: the timestamp column becomes a timeline card; columns with a
+  opened; whole-file counts, the timeline and the profile are kept in the
+  cache directory, so the next open of the same bytes shows the charts at
+  once (*cached* in the Values tab): the timestamp column becomes a
+  timeline card; columns with a
   handful of values (protocol, action, HTTP status, booleans) become pies;
   hosts, addresses, ports and paths become top-value bars; hashes, free
   text and plain numbers are skipped. Six panels at most by default —

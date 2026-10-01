@@ -971,6 +971,10 @@ fn values_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) {
             .color(DIM),
         );
         scope_label(ui, v.base);
+        if v.cached {
+            ui.label(RichText::new("cached").color(GREEN).size(11.0))
+                .on_hover_text("counted in an earlier session over the same bytes");
+        }
         if !r.exact {
             ui.label(
                 RichText::new(format!(
