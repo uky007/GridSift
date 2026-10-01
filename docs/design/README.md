@@ -99,6 +99,11 @@ Unchanged in function: virtual rows, typed headers (type + confidence on a
 second line), derived columns in green, matches in amber.
 
 ### Analysis dock (bottom, resizable, tabbed)
+Tabs in order: Values, Dashboard, Timeline, Profile. The dock opens on
+Values — not everyone wants charts, and charts cost scans — while the
+dashboard is built from the file-wide profile and counted in the
+background, on screen or not, so opening it shows current charts at once.
+
 - **Dashboard** (added after v1): cards picked from the profile — the
   timeline, pies for columns with a handful of values, top-value bars for
   hosts / addresses / ports — counted over the current selection and

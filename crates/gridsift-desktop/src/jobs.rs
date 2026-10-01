@@ -408,6 +408,9 @@ pub struct Panel {
     pub job: Option<FreqJob>,
     pub view: Option<FreqView>,
     pub error: Option<String>,
+    /// Waiting for its turn to be counted (panels are counted one after
+    /// another).
+    pub pending: bool,
 }
 
 impl Panel {
@@ -418,11 +421,12 @@ impl Panel {
             job: None,
             view: None,
             error: None,
+            pending: false,
         }
     }
 
     pub fn running(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.pending
     }
 }
 

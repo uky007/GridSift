@@ -70,6 +70,19 @@ pub fn dashboard_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Acti
             );
         });
     });
+    if !d.dashboard.auto_built && d.dashboard.panels.is_empty() {
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new(
+                    "profiling the columns — the dashboard builds itself from the file-wide profile and is counted in the background",
+                )
+                .color(DIM),
+            );
+        });
+        return;
+    }
     if d.dashboard.panels.is_empty() && d.timestamp_column().is_none() {
         ui.add_space(12.0);
         ui.label(

@@ -172,18 +172,21 @@ start; they exist for demos and screenshots.
   work is cancelled and exports are disabled until the file is reopened.
 - **Grid** — virtual rows over the index; typed headers; derived columns in
   green. *Go to row* jumps by ordinal.
-- **Analysis dock** — *Dashboard* (below), *Timeline* (drag a range on the
-  chart → *Filter to range*), *Values* (top-N with share bars; click a
-  value to filter by it), *Profile* (the full column profile).
-- **Dashboard** — built from the column profile the first time it is
+- **Analysis dock** — *Values* (top-N of a column with share bars; click a
+  value to filter by it; the tab the dock opens on), *Dashboard* (below),
+  *Timeline* (drag a range on the chart → *Filter to range*), *Profile*
+  (the full column profile).
+- **Dashboard** — built from the file-wide column profile as soon as that
+  is in and counted in the background, so it is ready when the tab is
   opened: the timestamp column becomes a timeline card; columns with a
   handful of values (protocol, action, HTTP status, booleans) become pies;
   hosts, addresses, ports and paths become top-value bars; hashes, free
   text and plain numbers are skipped. Six panels at most by default —
   *+ add column* or a column's *Add to dashboard* adds more, a panel's
   menu switches pie ↔ bars or removes it, *Auto-build* starts over. The
-  charts are counted over the current selection and recount when it
-  changes; clicking a slice or a bar filters to that exact value (a new
+  charts are counted over the current selection and recounted in the
+  background when it changes; clicking a slice or a bar filters to that
+  exact value (a new
   lineage chip), and dragging on the timeline card selects a range.
 - **Status bar** — first rows time, index time, rows cached, peak RSS.
 

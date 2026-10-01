@@ -664,9 +664,9 @@ pub fn dock(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
             let mut close = false;
             ui.horizontal(|ui| {
                 for (tab, label) in [
+                    (DockTab::Values, "Values"),
                     (DockTab::Dashboard, "Dashboard"),
                     (DockTab::Timeline, "Timeline"),
-                    (DockTab::Values, "Values"),
                     (DockTab::Profile, "Profile"),
                 ] {
                     if ui.selectable_label(d.dock_tab == tab, label).clicked() {
@@ -879,6 +879,19 @@ pub(crate) fn timeline_plot(ui: &mut egui::Ui, v: &mut TimelineView, id: &str, h
         });
 }
 
+/// The column picker of the Values tab.
+fn count_column_menu(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
+    ui.menu_button("count a column…", |ui| {
+        ui.set_min_width(160.0);
+        for i in 0..d.column_count() {
+            if ui.button(d.column_name(i)).clicked() {
+                actions.push(Action::Count(i));
+                ui.close();
+            }
+        }
+    });
+}
+
 fn values_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) {
     ui.horizontal(|ui| {
         if let Some(job) = &d.freq_job {
@@ -889,10 +902,11 @@ fn values_tab(ui: &mut egui::Ui, d: &mut Document, actions: &mut Vec<Action>) {
             }
             return;
         }
+        count_column_menu(ui, d, actions);
         let Some(v) = &d.freq else {
             ui.label(
                 RichText::new(
-                    "no counts yet — pick a column in the sidebar and choose Count values",
+                    "top values of a column over the current selection — pick one here or in a column's menu",
                 )
                 .color(DIM),
             );

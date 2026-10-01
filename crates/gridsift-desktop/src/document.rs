@@ -327,11 +327,17 @@ impl RuleSpec {
     }
 }
 
+/// Dashboard panels counted at the same time; the rest wait their turn. A
+/// count of an address column over twenty million records peaks near 300
+/// MiB (lossy tables on every worker), so one at a time keeps the
+/// background build's footprint at one count plus the timeline.
+const PANEL_COUNTS_AT_ONCE: usize = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockTab {
+    Values,
     Dashboard,
     Timeline,
-    Values,
     Profile,
 }
 
@@ -507,7 +513,7 @@ impl Document {
             timeline: None,
             freq_job: None,
             freq: None,
-            dock_tab: DockTab::Dashboard,
+            dock_tab: DockTab::Values,
             dock_open: false,
             dashboard: Dashboard::default(),
             first_rows_in,
@@ -721,6 +727,11 @@ impl Document {
             && let Ok(p) = h.join()
         {
             self.profile = Some(p);
+            // the dashboard is built from the file-wide profile and counted
+            // in the background, so it is ready when its tab is opened
+            if !self.dashboard.auto_built {
+                self.auto_build_dashboard();
+            }
         }
     }
 
@@ -1032,15 +1043,48 @@ impl Document {
 
     // -- dashboard ---------------------------------------------------------
 
-    /// Show the dashboard, building it from the column profile the first
-    /// time.
+    /// Show the dashboard. It is normally built from the file-wide profile
+    /// and counted in the background before anyone opens it; opened earlier,
+    /// it waits for that profile rather than guessing from the first rows,
+    /// unless no profile pass is coming. Its counts are current, so only a
+    /// timeline the analyst moved to another column is brought back.
     pub fn open_dashboard(&mut self) {
-        if self.dashboard.panels.is_empty() && !self.dashboard.auto_built {
+        if self.dashboard.panels.is_empty()
+            && !self.dashboard.auto_built
+            && self.profile_job.is_none()
+            && self.build.is_none()
+        {
             self.auto_build_dashboard();
         }
         self.dock_tab = DockTab::Dashboard;
         self.dock_open = true;
-        self.dashboard.stale = true;
+        if let Some(c) = self.timestamp_column()
+            && self.dashboard_ready()
+            && self.timeline_column_in_use() != Some(c)
+            && !self.source_changed
+            && self.guard_source()
+        {
+            self.start_timeline_inner(c, false);
+        }
+    }
+
+    /// Built from the file-wide profile, or given panels by the analyst:
+    /// nothing is counted before that.
+    fn dashboard_ready(&self) -> bool {
+        self.dashboard.auto_built || !self.dashboard.panels.is_empty()
+    }
+
+    fn dashboard_visible(&self) -> bool {
+        self.dock_open && self.dock_tab == DockTab::Dashboard
+    }
+
+    /// The column of the running or last timeline, which the Timeline tab
+    /// and the dashboard's timeline card share.
+    fn timeline_column_in_use(&self) -> Option<usize> {
+        self.timeline_job
+            .as_ref()
+            .map(|j| j.column)
+            .or_else(|| self.timeline.as_ref().map(|t| t.column))
     }
 
     /// Pick charts from what the columns hold: a pie for a column with a
@@ -1157,21 +1201,56 @@ impl Document {
     }
 
     /// Recount every panel (and the timeline) over the current selection.
+    /// The panels queue up and are counted one after another.
     fn refresh_dashboard(&mut self) {
         if !self.guard_source() {
             return;
         }
-        let columns: Vec<usize> = self.dashboard.panels.iter().map(|p| p.column).collect();
-        let jobs: Vec<Option<FreqJob>> = columns.iter().map(|&c| self.spawn_freq(c, 12)).collect();
-        for (p, job) in self.dashboard.panels.iter_mut().zip(jobs) {
+        for p in &mut self.dashboard.panels {
             if let Some(old) = &p.job {
                 old.cancel.store(true, Ordering::Relaxed);
             }
-            p.job = job;
+            p.job = None;
             p.error = None;
+            p.pending = true;
         }
-        if let Some(c) = self.timestamp_column() {
+        self.count_pending_panels();
+        // the timeline card shares the Timeline tab's job: a timeline the
+        // analyst started on another column is left alone while the
+        // dashboard is off screen
+        if let Some(c) = self.timestamp_column()
+            && (self.dashboard_visible() || self.timeline_column_in_use().is_none_or(|t| t == c))
+        {
             self.start_timeline_inner(c, false);
+        }
+    }
+
+    /// Start the counts of pending panels, at most [`PANEL_COUNTS_AT_ONCE`]
+    /// running: each count is a parallel scan with its own tables, so six
+    /// at once would multiply the memory and fight over the disk for no
+    /// gain in the background (907 MiB peak RSS on the CTU-13 file against
+    /// about 300 MiB one at a time).
+    fn count_pending_panels(&mut self) {
+        let running = self
+            .dashboard
+            .panels
+            .iter()
+            .filter(|p| p.job.is_some())
+            .count();
+        let next: Vec<(usize, usize)> = self
+            .dashboard
+            .panels
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.pending && p.job.is_none())
+            .map(|(i, p)| (i, p.column))
+            .take(PANEL_COUNTS_AT_ONCE.saturating_sub(running))
+            .collect();
+        for (i, column) in next {
+            let job = self.spawn_freq(column, 12);
+            let p = &mut self.dashboard.panels[i];
+            p.pending = false;
+            p.job = job;
         }
     }
 
@@ -1200,7 +1279,8 @@ impl Document {
             }
         }
         // a new selection step (or a change of view) makes the counts stale;
-        // they are recomputed when the dashboard is actually on screen
+        // they are recomputed in the background, on screen or not, so the
+        // tab shows current charts the moment it is opened
         let key = self.dashboard_key();
         if self.dashboard.key != Some(key) {
             self.dashboard.key = Some(key);
@@ -1209,14 +1289,11 @@ impl Document {
         // the timeline card exists whenever there is a timestamp column, with
         // or without value panels
         let has_content = !self.dashboard.panels.is_empty() || self.timestamp_column().is_some();
-        if self.dashboard.stale
-            && self.dock_open
-            && self.dock_tab == DockTab::Dashboard
-            && has_content
-            && !self.source_changed
-        {
+        if self.dashboard.stale && self.dashboard_ready() && has_content && !self.source_changed {
             self.dashboard.stale = false;
             self.refresh_dashboard();
+        } else if !self.source_changed {
+            self.count_pending_panels();
         }
     }
 
@@ -1636,24 +1713,93 @@ mod tests {
         assert_eq!(d.column_name(derived), "host.registrable");
         d.add_panel(derived);
         settle(&mut d);
-        let rows = &d.dashboard.panels[0].view.as_ref().unwrap().rows;
+        let rows = &panel_for(&d, derived).view.as_ref().unwrap().rows;
         assert_eq!(rows[0].0, "example.com");
         (ctx, d, derived)
     }
 
-    /// A file with nothing but a timestamp column still gets its timeline.
+    /// The panel charting `column` (the auto-built source panels come first).
+    fn panel_for(d: &Document, column: usize) -> &Panel {
+        d.dashboard
+            .panels
+            .iter()
+            .find(|p| p.column == column)
+            .expect("panel for the column")
+    }
+
+    /// A file with nothing but a timestamp column still gets its timeline —
+    /// in the background, before the dock is ever opened.
     #[test]
     fn timestamp_only_dashboard_starts_the_timeline() {
         let p = fixture(
             "timestamps.csv",
             "ts\n2026-09-21T14:13:20Z\n2026-09-21T14:13:21Z\n2026-09-21T15:13:22Z\n2026-09-21T15:13:23Z\n",
         );
-        let (_, mut d) = open(&p);
+        let (_, d) = open(&p);
         assert_eq!(d.timestamp_column(), Some(0));
-        d.open_dashboard();
-        settle(&mut d);
+        assert!(!d.dock_open);
+        assert!(d.dashboard.auto_built);
         assert!(d.dashboard.panels.is_empty());
         assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
+    }
+
+    fn select_host(ctx: &egui::Context, d: &mut Document, host: &str) {
+        d.search_ui.column = Some(1);
+        d.search_ui.pattern = host.into();
+        d.search_ui.exact = true;
+        d.search_ui.show_only = true;
+        d.start_search(ctx);
+        settle(d);
+        assert_eq!(d.selection.as_ref().unwrap().count(), 2);
+    }
+
+    /// The dock opens on Values; the dashboard is built from the file-wide
+    /// profile and counted while the dock is still closed, and a new
+    /// selection is recounted in the background as well.
+    #[test]
+    fn dashboard_is_built_and_recounted_in_the_background() {
+        let (ctx, mut d) = open(&fixture("hosts.csv", HOSTS));
+        assert_eq!(d.dock_tab, DockTab::Values);
+        assert!(!d.dock_open);
+        assert!(d.dashboard.auto_built);
+        let columns: Vec<usize> = d.dashboard.panels.iter().map(|p| p.column).collect();
+        assert_eq!(columns, [1, 2]);
+        for p in &d.dashboard.panels {
+            let v = p.view.as_ref().expect("counted in the background");
+            assert_eq!(v.base, None);
+            assert_eq!(v.rows[0].1, 2);
+        }
+        assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
+
+        select_host(&ctx, &mut d, "alpha.example.com");
+        assert!(!d.dock_open);
+        let v = d.dashboard.panels[0].view.as_ref().unwrap();
+        assert_eq!(v.base, Some(2));
+        assert_eq!(v.rows, [("alpha.example.com".to_string(), 2, 1.0)]);
+        assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(2));
+    }
+
+    /// A timeline the analyst started on another column survives the
+    /// background recount while the dashboard is off screen; opening the
+    /// dashboard brings the timestamp column back.
+    #[test]
+    fn background_recount_keeps_the_analysts_timeline() {
+        let (ctx, mut d) = open(&fixture("hosts.csv", HOSTS));
+        d.start_timeline(2);
+        settle(&mut d);
+        assert_eq!(d.dock_tab, DockTab::Timeline);
+        assert_eq!(d.timeline.as_ref().map(|t| t.column), Some(2));
+
+        select_host(&ctx, &mut d, "beta.example.com");
+        assert_eq!(d.dashboard.panels[0].view.as_ref().unwrap().base, Some(2));
+        assert_eq!(d.timeline.as_ref().map(|t| t.column), Some(2));
+
+        d.open_dashboard();
+        settle(&mut d);
+        assert_eq!(
+            d.timeline.as_ref().map(|t| (t.column, t.result.parsed)),
+            Some((0, 2))
+        );
     }
 
     /// Clicking a value of a derived column must not run a search over the
@@ -1694,15 +1840,17 @@ mod tests {
         }];
         d.apply_enrichment();
         // the old counts are gone immediately …
-        assert!(d.dashboard.panels[0].view.is_none());
+        assert!(panel_for(&d, derived).view.is_none());
         settle(&mut d);
         // … and the recount is for the new column
         assert_eq!(d.column_name(derived), "alternate_host.registrable");
-        let rows = &d.dashboard.panels[0].view.as_ref().unwrap().rows;
+        let rows = &panel_for(&d, derived).view.as_ref().unwrap().rows;
         assert_eq!(rows[0].0, "example.org");
-        // removing the enrichment removes the panel that pointed at it
+        // removing the enrichment removes the panel that pointed at it; the
+        // auto-built source panels stay
         d.enrich_ui.rules.clear();
         d.apply_enrichment();
-        assert!(d.dashboard.panels.is_empty());
+        let columns: Vec<usize> = d.dashboard.panels.iter().map(|p| p.column).collect();
+        assert_eq!(columns, [1, 2]);
     }
 }

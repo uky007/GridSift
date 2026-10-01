@@ -5,6 +5,17 @@ All notable changes to gridsift are recorded here. The format follows
 [Semantic Versioning](https://semver.org/) once 1.0 is reached — before
 that, minor versions may change interfaces and the manifest format.
 
+## [Unreleased]
+
+### Desktop (`gridsift-desktop`)
+- The analysis dock opens on *Values*, now the first tab and with its own
+  column picker. The dashboard is built from the file-wide profile and
+  counted in the background, on screen or not, so opening it shows current
+  charts at once; the panels are counted one after another (one count's
+  memory instead of six), and a timeline the analyst moved to another
+  column is left alone by the background recount while the dashboard is
+  off screen.
+
 ## [0.1.0] — 2026-10-01
 
 First public release.
@@ -50,4 +61,5 @@ First public release.
 - Measured to 10 GiB on a warm cache; the 100 GB cold-cache run is
   pending (see `docs/roadmap.md`).
 
+[Unreleased]: https://github.com/uky007/GridSift/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/uky007/GridSift/releases/tag/v0.1.0
