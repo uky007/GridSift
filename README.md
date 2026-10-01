@@ -38,7 +38,14 @@ application for Linux, macOS and Windows.
 
 ## Quick install
 
-Rust 1.88 or newer. Not on crates.io yet — build from source:
+Rust 1.88 or newer. From crates.io:
+
+```
+cargo install gridsift            # command-line tool
+cargo install gridsift-desktop    # desktop application
+```
+
+Or build from source:
 
 ```
 git clone https://github.com/uky007/GridSift.git

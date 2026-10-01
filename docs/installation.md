@@ -1,7 +1,18 @@
 # Installation
 
-gridsift is not on crates.io yet; build it from source. Rust 1.88 or newer
-is required (edition 2024; 1.88 is what the dependency graph needs — the Linux file-dialog backend).
+Rust 1.88 or newer is required (edition 2024; 1.88 is what the dependency
+graph needs — the Linux file-dialog backend).
+
+## From crates.io
+
+```
+cargo install gridsift            # the command-line tool
+cargo install gridsift-desktop    # the desktop application (egui)
+```
+
+Both go into `~/.cargo/bin`. The engine is published separately as
+[`gridsift-core`](https://crates.io/crates/gridsift-core) for use as a
+library. Releases are listed in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Build from source
 

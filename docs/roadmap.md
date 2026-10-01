@@ -55,13 +55,13 @@ The go / no-go criteria for the whole project:
 - **Share-safe manifest variant**: relative paths and hashed query terms
   for a manifest that leaves the case boundary, next to the complete one
   that stays with the case.
-- **Project hygiene for a public repository**: CONTRIBUTING, SECURITY and
-  the MSRV CI job exist; still to do — CHANGELOG, locked dependencies for
-  release builds, a secret scan of the final history before the switch to
-  public.
+- **Project hygiene**: CONTRIBUTING, SECURITY, CHANGELOG, the MSRV CI job
+  and crates.io packaging exist; still to do — locked dependencies for
+  release builds and a dependency audit (`cargo audit` / `cargo deny`) in
+  CI.
 - **UTF-16 / encoding handling** and compressed input (`.gz`).
-- **Packaging**: `cargo install`, signed macOS / Windows builds, a Linux
-  AppImage or static binary; a release workflow.
+- **Packaging**: signed macOS / Windows builds, a Linux AppImage or static
+  binary; a release workflow that attaches them to GitHub releases.
 - Desktop polish from the v1 design's open points: dock height memory,
   separate scrolling for very wide files, recent files.
 
