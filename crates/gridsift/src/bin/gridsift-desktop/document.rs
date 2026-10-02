@@ -599,7 +599,7 @@ impl Document {
             freq_job: None,
             freq: None,
             dock_tab: DockTab::Values,
-            dock_open: false,
+            dock_open: true,
             dashboard: Dashboard::default(),
             first_rows_in,
             index_elapsed: None,
@@ -1982,7 +1982,7 @@ mod tests {
         );
         let (_, d) = open(&p);
         assert_eq!(d.timestamp_column(), Some(0));
-        assert!(!d.dock_open);
+        assert_eq!(d.dock_tab, DockTab::Values);
         assert!(d.dashboard.auto_built);
         assert!(d.dashboard.panels.is_empty());
         assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
@@ -2083,8 +2083,7 @@ mod tests {
     #[test]
     fn dashboard_is_built_and_recounted_in_the_background() {
         let (ctx, mut d) = open(&fixture("hosts.csv", HOSTS));
-        assert_eq!(d.dock_tab, DockTab::Values);
-        assert!(!d.dock_open);
+        assert!(d.dock_open && d.dock_tab == DockTab::Values);
         assert!(d.dashboard.auto_built);
         let columns: Vec<usize> = d.dashboard.panels.iter().map(|p| p.column).collect();
         assert_eq!(columns, [1, 2]);
@@ -2096,7 +2095,7 @@ mod tests {
         assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(4));
 
         select_host(&ctx, &mut d, "alpha.example.com");
-        assert!(!d.dock_open);
+        assert_eq!(d.dock_tab, DockTab::Values);
         let v = d.dashboard.panels[0].view.as_ref().unwrap();
         assert_eq!(v.base, Some(2));
         assert_eq!(v.rows, [("alpha.example.com".to_string(), 2, 1.0)]);

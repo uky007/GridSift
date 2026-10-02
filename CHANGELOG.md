@@ -33,8 +33,9 @@ that, minor versions may change interfaces and the manifest format.
   manifest of every export (`source.dialect.names`), never in the file.
 
 ### Desktop (`gridsift-desktop`)
-- The analysis dock opens on *Values*, now the first tab and with its own
-  column picker. The dashboard is built from the file-wide profile and
+- The analysis dock is open from the start, on *Values*, now the first tab
+  and with its own column picker; *Analysis* in the command bar hides and
+  shows it. The dashboard is built from the file-wide profile and
   counted in the background, on screen or not, so opening it shows current
   charts at once; the panels are counted one after another (one count's
   memory instead of six), and a timeline the analyst moved to another

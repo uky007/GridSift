@@ -182,10 +182,11 @@ and `--names a,b,c` read the file the way the command line would.
   work is cancelled and exports are disabled until the file is reopened.
 - **Grid** — virtual rows over the index; typed headers; derived columns in
   green. *Go to row* jumps by ordinal.
-- **Analysis dock** — *Values* (top-N of a column with share bars; click a
-  value to filter by it; the tab the dock opens on), *Dashboard* (below),
-  *Timeline* (drag a range on the chart → *Filter to range*), *Profile*
-  (the full column profile).
+- **Analysis dock** — open from the start on *Values* (top-N of a column
+  with share bars; click a value to filter by it), then *Dashboard*
+  (below), *Timeline* (drag a range on the chart → *Filter to range*),
+  *Profile* (the full column profile). *Analysis* in the command bar hides
+  and shows it.
 - **Dashboard** — built from the file-wide column profile as soon as that
   is in and counted in the background, so it is ready when the tab is
   opened; whole-file counts, the timeline and the profile are kept in the

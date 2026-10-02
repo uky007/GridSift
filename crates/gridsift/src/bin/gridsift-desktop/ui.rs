@@ -397,7 +397,7 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                 ui.label(RichText::new("🔍").color(DIM));
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut d.search_ui.pattern)
-                        .desired_width(420.0)
+                        .desired_width(360.0)
                         .font(egui::TextStyle::Monospace)
                         .hint_text(format!("literal text, or a regex  ({}F)", theme::CMD)),
                 );
@@ -433,6 +433,9 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                 if ui.button("Find").clicked() {
                     actions.push(Action::Find);
                 }
+                ui.add_space(8.0);
+                // the analysis dock is open from the start; this hides and shows it
+                theme::toggle_chip(ui, &mut d.dock_open, "Analysis");
                 if let Some(e) = &d.search_ui.error {
                     ui.colored_label(RED, format!("invalid pattern: {e}"));
                 }
@@ -440,8 +443,8 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                     ui.label(RichText::new("Go to row").color(DIM));
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut d.goto)
-                            .desired_width(90.0)
-                            .hint_text("0-based"),
+                            .desired_width(80.0)
+                            .hint_text("row"),
                     );
                     if r.lost_focus()
                         && ui.input(|i| i.key_pressed(Key::Enter))
