@@ -884,7 +884,7 @@ impl Document {
         if !(now || idle) {
             return;
         }
-        if let (Some(a), Some(p)) = (&self.analysis, &self.analysis_path)
+        if let (Some(a), Some(p)) = (&mut self.analysis, &self.analysis_path)
             && !a.is_empty()
             && let Err(e) = a.save_for(&self.source, p)
         {
@@ -1503,7 +1503,9 @@ impl Document {
             return;
         };
         let base = self.scan_base();
-        // the whole-file timeline comes from the analysis cache
+        // the whole-file timeline comes from the analysis cache: from memory
+        // when it was computed this session, else from the companion file,
+        // which the worker reads so that nothing large is parsed up front
         let reference_year = TimelineOptions::default().reference_year;
         if base.is_none()
             && let Some(cached) = self
@@ -1519,6 +1521,18 @@ impl Document {
             }
             return;
         }
+        let cached_file = base
+            .is_none()
+            .then(|| self.analysis_path.clone())
+            .flatten()
+            .map(|p| {
+                let sha = self
+                    .index
+                    .read()
+                    .ok()
+                    .and_then(|i| i.digests.sha256.map(|d| hex(&d)));
+                (p, self.source.id(), sha)
+            });
         let shared = Arc::new(FrequencyShared::new(self.source.len()));
         let cancel = Arc::new(AtomicBool::new(false));
         let (source, s2, c2, b2) = (
@@ -1548,7 +1562,18 @@ impl Document {
                     cancel: Some(&c2),
                     ..TimelineOptions::default()
                 };
-                timeline(&source, &index, selection, opts, &s2)
+                if let Some((p, id, sha)) = &cached_file
+                    && let Some(t) = AnalysisCache::load_timeline(
+                        p,
+                        *id,
+                        sha.as_deref(),
+                        column,
+                        opts.reference_year,
+                    )
+                {
+                    return Ok((t, true));
+                }
+                timeline(&source, &index, selection, opts, &s2).map(|t| (t, false))
             })
             .expect("spawn timeline thread");
         self.timeline_job = Some(TimelineJob {
@@ -1557,7 +1582,6 @@ impl Document {
             handle: Some(handle),
             column,
             base,
-            cached: false,
         });
         if switch {
             self.dock_tab = DockTab::Timeline;
@@ -1574,12 +1598,15 @@ impl Document {
         }
         let handle = job.handle.take().expect("handle present until joined");
         let column = job.column;
-        let keep = job.base.is_none() && !job.cached;
+        let whole_file = job.base.is_none();
         let base = job.base.as_ref().map(|n| n.count());
         self.timeline_job = None;
         match handle.join() {
-            Ok(Ok(result)) if result.complete => {
-                if keep && let Some(a) = self.analysis_mut() {
+            Ok(Ok((result, from_cache))) if result.complete => {
+                if whole_file
+                    && !from_cache
+                    && let Some(a) = self.analysis_mut()
+                {
                     a.put_timeline(result.clone());
                 }
                 self.timeline = Some(TimelineView::new(column, result, base))

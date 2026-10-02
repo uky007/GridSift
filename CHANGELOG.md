@@ -15,8 +15,9 @@ that, minor versions may change interfaces and the manifest format.
 
 ### Analysis cache
 - Whole-file results are kept in the user cache directory beside the index
-  sidecar (`*.gsan`): the file-wide column profile, value counts and
-  timelines over all records. The next open of the same bytes — same
+  sidecar: the file-wide column profile and value counts (`*.gsan`) and
+  the timelines over all records (`*.gstl`, read only when a timeline is
+  asked for). The next open of the same bytes — same
   size, modification time and SHA-256 — shows the dashboard and timeline
   at once and starts no profile pass; `freq`, `timeline` and `profile`
   report `cached`. Counts over a selection or of derived columns are

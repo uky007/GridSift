@@ -477,25 +477,23 @@ impl Dashboard {
 pub struct TimelineJob {
     pub shared: Arc<FrequencyShared>,
     pub cancel: Arc<AtomicBool>,
-    pub handle: Option<JoinHandle<std::io::Result<TimelineResult>>>,
+    /// The result and whether it came from the analysis cache.
+    pub handle: Option<JoinHandle<std::io::Result<(TimelineResult, bool)>>>,
     pub column: usize,
     /// The selection the timeline is restricted to, if any.
     pub base: Option<Arc<SelectionNode>>,
-    /// Served from the analysis cache rather than scanned.
-    pub cached: bool,
 }
 
 impl TimelineJob {
-    /// A whole-file timeline from the analysis cache: finished before it starts.
+    /// A whole-file timeline already in memory: finished before it starts.
     pub fn cached(result: TimelineResult, source_len: u64) -> TimelineJob {
         let column = result.column;
         TimelineJob {
             shared: Arc::new(FrequencyShared::new(source_len)),
             cancel: Arc::new(AtomicBool::new(false)),
-            handle: Some(std::thread::spawn(move || Ok(result))),
+            handle: Some(std::thread::spawn(move || Ok((result, true)))),
             column,
             base: None,
-            cached: true,
         }
     }
 }

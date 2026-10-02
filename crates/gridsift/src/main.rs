@@ -2421,10 +2421,9 @@ fn cmd_timeline(file: &Path, args: &DialectArgs, o: TimelineArgs, json: bool) ->
     let mut analysis = analysis_path
         .as_ref()
         .and_then(|p| AnalysisCache::load_for(p, src.id(), sha.as_deref()));
-    let cached = analysis
-        .as_ref()
-        .and_then(|a| a.timeline(column, reference_year))
-        .cloned();
+    let cached = analysis_path.as_ref().and_then(|p| {
+        AnalysisCache::load_timeline(p, src.id(), sha.as_deref(), column, reference_year)
+    });
     let from_cache = cached.is_some();
 
     let matches = match &o.search {

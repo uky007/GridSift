@@ -69,9 +69,9 @@ console window.
 ## Where gridsift writes
 
 gridsift never writes next to the evidence. The only files it creates on
-its own are index sidecars (`*.gsix`) and analysis caches (`*.gsan`: the
-column profile, whole-file value counts and timelines) in the user cache
-directory:
+its own are index sidecars (`*.gsix`) and analysis caches (`*.gsan` with
+the column profile and whole-file value counts, `*.gstl` with the
+timelines) in the user cache directory:
 
 | platform | cache directory |
 |---|---|
