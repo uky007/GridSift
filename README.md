@@ -21,7 +21,7 @@ application for Linux, macOS and Windows.
   read buffers is what navigation needs, so the index pass runs in the same
   ~35 MiB at 1 GiB and at 10 GiB. Match sets and lookup tables grow with
   the matches and the tables, not with the file (measured operations and
-  conditions in [bench/README.md](bench/README.md)).
+  conditions in [bench/README.md](https://github.com/uky007/GridSift/blob/main/bench/README.md)).
 - **Strictly offline** -- No telemetry, no update checks, no DNS.
   Enrichment (GeoIP / ASN, domain classification, lookups) uses only local
   datasets the analyst imports, each identified by hash.
@@ -57,7 +57,7 @@ cargo build --release
 ./target/release/gridsift-desktop
 ```
 
-See [docs/installation.md](docs/installation.md) for Linux build
+See [docs/installation.md](https://github.com/uky007/GridSift/blob/main/docs/installation.md) for Linux build
 dependencies, the `dist` profile and where the index cache lives.
 
 ## Quick usage
@@ -88,11 +88,11 @@ gridsift-desktop proxy.csv --search '/c2/beacon' --dashboard
 ```
 
 Redaction with a key (`--redact user=hmac --hmac-key-file KEY`) is shown
-in [docs/usage.md](docs/usage.md); keep the key outside the repository
+in [docs/usage.md](https://github.com/uky007/GridSift/blob/main/docs/usage.md); keep the key outside the repository
 (`*.key` is ignored) and never in the manifest, which records only its
 fingerprint.
 
-See [docs/usage.md](docs/usage.md) for every option, `jq` recipes and the
+See [docs/usage.md](https://github.com/uky007/GridSift/blob/main/docs/usage.md) for every option, `jq` recipes and the
 desktop walkthrough.
 
 ## Key features
@@ -128,7 +128,7 @@ desktop walkthrough.
   the key) goes into the manifest.
 - **Provenance manifest** -- source identity, parser settings, every
   operation, output digest; written before the output it describes and
-  checked by `gridsift verify` ([docs/manifest.md](docs/manifest.md)).
+  checked by `gridsift verify` ([docs/manifest.md](https://github.com/uky007/GridSift/blob/main/docs/manifest.md)).
 - **Evidence protection by construction** -- every path the tool writes
   (output, manifest, index sidecar, their temporaries) is checked against
   the source first; a source that changes on disk after it was opened is
@@ -145,19 +145,19 @@ research data that stays under its own licence.
 
 ### Dashboard: charts built from the column types, following the selection
 
-![gridsift dashboard](images/gridsift-dashboard.png)
+![gridsift dashboard](https://raw.githubusercontent.com/uky007/GridSift/main/images/gridsift-dashboard.png)
 
 ### Desktop: search, lineage, timeline
 
-![gridsift desktop](images/gridsift-desktop.png)
+![gridsift desktop](https://raw.githubusercontent.com/uky007/GridSift/main/images/gridsift-desktop.png)
 
 ### Value counts within the selection
 
-![gridsift values](images/gridsift-values.png)
+![gridsift values](https://raw.githubusercontent.com/uky007/GridSift/main/images/gridsift-values.png)
 
 ### Export finding: lineage, redaction, manifest
 
-![gridsift export](images/gridsift-export.png)
+![gridsift export](https://raw.githubusercontent.com/uky007/GridSift/main/images/gridsift-export.png)
 
 ### On real traffic: the thirteen CTU-13 botnet captures as one 4.9 GB file
 
@@ -166,10 +166,10 @@ Laboratory, Czech Technical University in Prague; [CC BY 2.0](https://creativeco
 García et al. 2014), with the `From-Botnet` flows selected and the charts
 following the selection. The addresses are the dataset's own, and the data
 in this image stays under the dataset's licence, not the project's (see
-[NOTICE](NOTICE)). The investigation with its known answers is in
-[docs/demo.md](docs/demo.md).
+[NOTICE](https://github.com/uky007/GridSift/blob/main/NOTICE)). The investigation with its known answers is in
+[docs/demo.md](https://github.com/uky007/GridSift/blob/main/docs/demo.md).
 
-![gridsift dashboard on CTU-13](images/demo-ctu13-dashboard.png)
+![gridsift dashboard on CTU-13](https://raw.githubusercontent.com/uky007/GridSift/main/images/demo-ctu13-dashboard.png)
 
 ## Exit codes
 
@@ -181,23 +181,23 @@ in this image stays under the dataset's licence, not the project's (see
 
 ## Docs
 
-- [Why gridsift exists — the problem, who it is for, how it is used](docs/motivation.md)
-- [Description & feature list](docs/description.md)
-- [Installation](docs/installation.md)
-- [Usage & examples](docs/usage.md)
-- [Demo on real traffic (CTU-13), with known answers](docs/demo.md)
-- [The provenance manifest](docs/manifest.md)
-- [Survey of existing tools](docs/survey.md)
-- [Roadmap](docs/roadmap.md)
-- [Desktop UI design](docs/design/README.md)
-- [Benchmarks](bench/README.md)
+- [Why gridsift exists — the problem, who it is for, how it is used](https://github.com/uky007/GridSift/blob/main/docs/motivation.md)
+- [Description & feature list](https://github.com/uky007/GridSift/blob/main/docs/description.md)
+- [Installation](https://github.com/uky007/GridSift/blob/main/docs/installation.md)
+- [Usage & examples](https://github.com/uky007/GridSift/blob/main/docs/usage.md)
+- [Demo on real traffic (CTU-13), with known answers](https://github.com/uky007/GridSift/blob/main/docs/demo.md)
+- [The provenance manifest](https://github.com/uky007/GridSift/blob/main/docs/manifest.md)
+- [Survey of existing tools](https://github.com/uky007/GridSift/blob/main/docs/survey.md)
+- [Roadmap](https://github.com/uky007/GridSift/blob/main/docs/roadmap.md)
+- [Desktop UI design](https://github.com/uky007/GridSift/blob/main/docs/design/README.md)
+- [Benchmarks](https://github.com/uky007/GridSift/blob/main/bench/README.md)
 
 ## License
 
 Dual-licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/uky007/GridSift/blob/main/LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](https://github.com/uky007/GridSift/blob/main/LICENSE-MIT))
 
 at your option. Third-party licences, and the licence of the dataset shown
-in the CTU-13 screenshot, are listed in [NOTICE](NOTICE).
+in the CTU-13 screenshot, are listed in [NOTICE](https://github.com/uky007/GridSift/blob/main/NOTICE).
