@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use gridsift_core::analysis::AnalysisCache;
 use gridsift_core::dialect::sniff;
+use gridsift_core::edits::EditSet;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, Selection, Terminator, export_pending};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
@@ -190,6 +191,9 @@ enum Cmd {
         /// File holding the HMAC key for `hmac` redactions (or set GRIDSIFT_HMAC_KEY)
         #[arg(long)]
         hmac_key_file: Option<PathBuf>,
+        /// Apply the cell edits of a saved version file (`*.gsedit`); the manifest lists them
+        #[arg(long, value_name = "FILE")]
+        edits: Option<PathBuf>,
         #[command(flatten)]
         enrich: EnrichArgs,
     },
@@ -594,6 +598,7 @@ fn main() {
             index,
             redact,
             hmac_key_file,
+            edits,
             enrich,
         } => cmd_export(
             &file,
@@ -614,6 +619,7 @@ fn main() {
                 index_path: index,
                 redact,
                 hmac_key_file,
+                edits,
                 enrich,
             },
             json,
@@ -1545,6 +1551,7 @@ struct ExportArgs {
     index_path: Option<PathBuf>,
     redact: Vec<String>,
     hmac_key_file: Option<PathBuf>,
+    edits: Option<PathBuf>,
     enrich: EnrichArgs,
 }
 
@@ -1706,6 +1713,38 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
     } else {
         Terminator::Lf
     };
+    // the analyst's cell edits, from a version made for these very bytes
+    let edits = match &o.edits {
+        Some(p) => {
+            let set = EditSet::load(p).with_context(|| format!("reading edits {}", p.display()))?;
+            let sha = idx.digests.sha256.map(|d| hex(&d));
+            if !set.matches_source(src.len(), sha.as_deref()) {
+                bail!(
+                    "the edits in {} were made for a different file (size or digest differ)",
+                    p.display()
+                );
+            }
+            let names: Vec<String> = header
+                .as_ref()
+                .map(|h| h.iter().map(|f| field_str(f).into_owned()).collect())
+                .unwrap_or_default();
+            // after the selection steps, before redaction and enrichment
+            let pos = operations
+                .iter()
+                .take_while(|op| {
+                    matches!(op, Operation::Search { .. } | Operation::TimeRange { .. })
+                })
+                .count();
+            operations.insert(
+                pos,
+                Operation::Edit {
+                    edits: set.info(&names),
+                },
+            );
+            Some(set)
+        }
+        None => None,
+    };
     let opts = ExportOptions {
         include_header: !o.omit_header,
         terminator,
@@ -1713,6 +1752,7 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         overwrite: o.force,
         redactor: redactor.as_ref(),
         enrichment: enrichment.as_ref(),
+        edits: edits.as_ref(),
         ..ExportOptions::default()
     };
     // the whole output plan — CSV, manifest and their temporaries — is
@@ -1942,6 +1982,24 @@ fn cmd_verify(
                             r.column,
                             r.provider,
                             r.derived.join(", ")
+                        );
+                    }
+                }
+                Operation::Edit { edits } => {
+                    println!(
+                        "            edit: {} cell(s) from version {:?}, {} marked row(s)",
+                        edits.cells.len(),
+                        edits.version,
+                        edits.marks
+                    );
+                    for c in &edits.cells {
+                        println!(
+                            "              record {} {} (column {}) → {:?} (was sha256 {}…)",
+                            c.record,
+                            c.name,
+                            c.column,
+                            c.value,
+                            &c.was_sha256[..16]
                         );
                     }
                 }

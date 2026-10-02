@@ -120,6 +120,9 @@ desktop walkthrough.
 - **Offline enrichment** -- GeoIP / ASN from an imported MMDB, registrable
   domain from the bundled Public Suffix List, joins against local CSVs;
   derived columns in the grid, in counts and in exports.
+- **Edits as an overlay** -- change cells and mark rows in the grid; saved
+  as named versions with the case, never into the source; an export can
+  apply them and its manifest lists every change.
 - **Export with redaction** -- exact source bytes per record, or drop /
   mask / partial / ip-prefix / HMAC-pseudonymised columns; the policy (never
   the key) goes into the manifest.

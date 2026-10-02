@@ -55,6 +55,15 @@ pub fn export_window(ctx: &egui::Context, d: &mut Document) {
                     format!("append the {} derived columns", d.derived_names.len()),
                 );
             }
+            if !d.edits.is_empty() {
+                ui.checkbox(
+                    &mut d.export_ui.apply_edits,
+                    format!(
+                        "apply the {} edited cells (the manifest lists each, the original by its hash)",
+                        d.edits.cells.len()
+                    ),
+                );
+            }
             ui.separator();
 
             // -- redaction
@@ -184,7 +193,8 @@ pub fn export_window(ctx: &egui::Context, d: &mut Document) {
         d.export_ui.open = false;
         d.export_ui.error = None;
         let include_derived = d.export_ui.include_derived;
-        d.start_export(p, rules, key, include_derived);
+        let apply_edits = d.export_ui.apply_edits;
+        d.start_export(p, rules, key, include_derived, apply_edits);
     }
 }
 

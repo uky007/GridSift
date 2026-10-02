@@ -47,9 +47,9 @@ The go / no-go criteria for the whole project:
   benchmarked.
 - **Windows and Linux numbers** in the benchmark table (CI already builds
   and tests on all three).
-- **Analyst annotations** as a sidecar overlay: tags and notes on records
-  that travel with the case and appear in the export manifest, without
-  touching the source.
+- **Analyst annotations**: cell edits and row marks exist as named
+  versions (see usage); still to do — notes and tags on records, a
+  versions list inside the application, exporting marks as a column.
 - **Signed manifests** (optional key) so an exported finding can be
   attributed as well as verified.
 - **Share-safe manifest variant**: relative paths and hashed query terms

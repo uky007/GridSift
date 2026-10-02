@@ -10,6 +10,7 @@ use eframe::egui;
 use gridsift_core::Source;
 use gridsift_core::analysis::AnalysisCache;
 use gridsift_core::dialect::sniff;
+use gridsift_core::edits::EditSet;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
 use gridsift_core::export::{ExportOptions, Selection, export_pending};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyResult, FrequencyShared, frequency};
@@ -125,6 +126,8 @@ pub struct ExportUi {
     /// Kept in memory only; the manifest records a fingerprint.
     pub hmac_key: String,
     pub include_derived: bool,
+    /// Write the analyst's cell edits into the output (recorded in the manifest).
+    pub apply_edits: bool,
     pub error: Option<String>,
 }
 
@@ -137,6 +140,7 @@ impl Default for ExportUi {
             keep: 3,
             bits: 24,
             hmac_len: DEFAULT_HMAC_LENGTH,
+            apply_edits: true,
             hmac_key: String::new(),
             include_derived: true,
             error: None,
@@ -367,6 +371,15 @@ pub struct NamesUi {
     pub text: String,
 }
 
+/// The cell being typed into.
+pub struct CellEditor {
+    pub record: u64,
+    pub column: usize,
+    pub text: String,
+    /// Take the keyboard focus on the next frame.
+    pub focus: bool,
+}
+
 pub struct Document {
     pub path: PathBuf,
     pub source: Arc<Source>,
@@ -418,6 +431,14 @@ pub struct Document {
     pub sidecar: Option<PathBuf>,
     pub status: Option<String>,
 
+    /// Edits laid over the source (cell values, row marks); never written
+    /// into the file, saved as named versions.
+    pub edits: EditSet,
+    pub edit_mode: bool,
+    pub editing: Option<CellEditor>,
+    /// Where the edits were last saved to or loaded from.
+    pub version_path: Option<PathBuf>,
+    pub edits_dirty: bool,
     /// A cached index without a digest gets one from this pass.
     pub digest_job: Option<DigestJob>,
     /// Whole-file analyses (profile, counts, timelines) kept between
@@ -612,6 +633,11 @@ impl Document {
             enrichment_gen: 0,
             names: opts.names,
             names_ui: NamesUi::default(),
+            edits: EditSet::default(),
+            edit_mode: false,
+            editing: None,
+            version_path: None,
+            edits_dirty: false,
             analysis,
             analysis_path,
             analysis_dirty: false,
@@ -1659,6 +1685,67 @@ impl Document {
         self.dashboard.stale = true;
     }
 
+    // -- edits -------------------------------------------------------------
+    // (cells and marks are changed by the grid directly on `edits`, which
+    // sets `edits_dirty`; the versions are handled here)
+
+    fn source_sha256(&self) -> Option<String> {
+        self.index
+            .read()
+            .ok()
+            .and_then(|i| i.digests.sha256.map(|d| hex(&d)))
+    }
+
+    /// Save the edits as a version named after the file's stem.
+    pub fn save_version(&mut self, path: PathBuf) {
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "version".into());
+        self.edits
+            .stamp(&self.source, self.source_sha256(), name.clone());
+        match self.edits.save_for(&self.source, &path) {
+            Ok(()) => {
+                self.version_path = Some(path);
+                self.edits_dirty = false;
+                self.status = Some(format!("version {name:?} saved"));
+            }
+            Err(e) => self.status = Some(format!("version not saved: {e}")),
+        }
+    }
+
+    /// Load a version, if it was made for these bytes.
+    pub fn load_version(&mut self, path: PathBuf) {
+        match EditSet::load(&path) {
+            Ok(set) => {
+                if !set.matches_source(self.source.len(), self.source_sha256().as_deref()) {
+                    self.status = Some(
+                        "this version was made for a different file (size or digest differ)".into(),
+                    );
+                    return;
+                }
+                self.status = Some(format!(
+                    "version {:?} loaded: {} cells, {} marked rows",
+                    set.name,
+                    set.cells.len(),
+                    set.marks.len()
+                ));
+                self.edits = set;
+                self.editing = None;
+                self.version_path = Some(path);
+                self.edits_dirty = false;
+            }
+            Err(e) => self.status = Some(format!("version not loaded: {e}")),
+        }
+    }
+
+    pub fn discard_edits(&mut self) {
+        self.edits = EditSet::default();
+        self.editing = None;
+        self.version_path = None;
+        self.edits_dirty = false;
+    }
+
     // -- export ------------------------------------------------------------
 
     /// Export the current view (the selection when filtering, else all
@@ -1669,6 +1756,7 @@ impl Document {
         rules: Vec<RedactRule>,
         hmac_key: Option<Vec<u8>>,
         include_derived: bool,
+        apply_edits: bool,
     ) {
         self.check_source(true);
         if let Some(why) = self.export_blocker() {
@@ -1705,6 +1793,8 @@ impl Document {
             out.clone(),
         );
         let names = self.names.clone();
+        let edits = (apply_edits && !self.edits.is_empty()).then(|| self.edits.clone());
+        let column_names = self.header.clone();
         let handle = std::thread::Builder::new()
             .name("gridsift-export".into())
             .spawn(move || {
@@ -1722,6 +1812,11 @@ impl Document {
                     )
                 };
                 let mut operations = operations;
+                if let Some(e) = &edits {
+                    operations.push(Operation::Edit {
+                        edits: e.info(&column_names),
+                    });
+                }
                 if let Some(e) = &enrichment {
                     operations.push(Operation::Enrich { rules: e.info() });
                 }
@@ -1734,6 +1829,7 @@ impl Document {
                     overwrite: true,
                     redactor: redactor.as_ref(),
                     enrichment: enrichment.as_deref(),
+                    edits: edits.as_ref(),
                     cancel: Some(&c2),
                     ..ExportOptions::default()
                 };
@@ -1913,6 +2009,7 @@ mod tests {
             if d.build.is_none()
                 && d.profile_job.is_none()
                 && d.digest_job.is_none()
+                && d.export.is_none()
                 && !d.selection_running()
                 && !d.dashboard.running()
                 && d.timeline_job.is_none()
@@ -2065,6 +2162,75 @@ mod tests {
         settle(&mut d);
         assert!(!d.dashboard.panels[0].view.as_ref().unwrap().cached);
         assert_eq!(d.timeline.as_ref().map(|t| t.result.parsed), Some(5));
+    }
+
+    /// Edits overlay the source: they save as a named version that only
+    /// loads onto the same bytes, and an export applies them to exactly the
+    /// edited records while the manifest lists each change.
+    #[test]
+    fn edits_overlay_the_source_and_travel_through_versions_and_exports() {
+        let (_, mut d) = open(&fixture("hosts.csv", HOSTS));
+        d.edits.set_cell(
+            1,
+            1,
+            "edited.example.com".into(),
+            "alpha.example.com".into(),
+        );
+        d.edits
+            .set_cell(2, 2, "beta.example.org".into(), "beta.example.org".into());
+        d.edits.set_mark(3, 2, None);
+        d.edits_dirty = true;
+        assert_eq!(d.edits.cells.len(), 1, "the source value is no edit");
+        assert_eq!(d.edits.marks.len(), 1);
+        assert!(d.edits_dirty);
+
+        let vpath = d
+            .path
+            .parent()
+            .unwrap()
+            .join("versions")
+            .join("first.gsedit");
+        d.save_version(vpath.clone());
+        assert!(!d.edits_dirty && vpath.is_file());
+        assert_eq!(d.edits.name, "first");
+        assert_eq!(
+            std::fs::read_to_string(&d.path).unwrap(),
+            HOSTS,
+            "source untouched"
+        );
+
+        let (_, mut again) = open(&d.path.clone());
+        again.load_version(vpath.clone());
+        assert_eq!(again.edits, d.edits);
+        let other = fixture(
+            "other.csv",
+            "ts,host,alternate_host\n2026-09-21T14:13:20Z,x,y\n",
+        );
+        let (_, mut o) = open(&other);
+        o.load_version(vpath);
+        assert!(o.edits.is_empty(), "made for other bytes");
+
+        let out = d.path.parent().unwrap().join("edited.csv");
+        d.start_export(out.clone(), vec![], None, false, true);
+        settle(&mut d);
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            text,
+            HOSTS.replace(
+                "2026-09-21T14:13:21Z,alpha.example.com,alpha.example.org",
+                "2026-09-21T14:13:21Z,edited.example.com,alpha.example.org"
+            )
+        );
+        let m: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(Manifest::path_for(&out)).unwrap()).unwrap();
+        assert_eq!(m["operations"][0]["op"], "edit");
+        assert_eq!(m["operations"][0]["edits"]["version"], "first");
+        assert_eq!(m["operations"][0]["edits"]["cells"][0]["name"], "host");
+        assert_eq!(
+            m["operations"][0]["edits"]["cells"][0]["value"],
+            "edited.example.com"
+        );
+        assert_eq!(m["operations"][0]["edits"]["marks"], 1);
     }
 
     fn select_host(ctx: &egui::Context, d: &mut Document, host: &str) {

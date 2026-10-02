@@ -7,7 +7,9 @@ elapsed time, throughput and peak RSS. Dialect overrides (`-d ,` / `-d tab`,
 `--no-quote`, `--header` / `--no-header`) are accepted wherever a file is
 read, as is `--names a,b,c`: names for the columns of a file without a
 header (it implies `--no-header`); they resolve `-c`, label the output and
-are recorded in the manifest of an export. The index sidecar is found in
+are recorded in the manifest of an export. `export --edits FILE` applies
+the cell edits of a version saved by the desktop application, refusing a
+version made for other bytes. The index sidecar is found in
 the user cache directory automatically; `--index PATH` uses another one.
 Whole-file results are kept there too: `freq` and `timeline` without `-s`
 and `profile` answer from the analysis cache the second time (`cached`
@@ -202,6 +204,16 @@ and `--names a,b,c` read the file the way the command line would.
   background when it changes; clicking a slice or a bar filters to that
   exact value (a new
   lineage chip), and dragging on the timeline card selects a range.
+- **Edits** — *Edit* in the command bar makes source cells editable: click
+  one, type, Enter (Escape cancels; typing the original value back removes
+  the edit). A right-click on a row number marks the row in one of six
+  colours. Edited cells are amber with their original value on hover;
+  marked rows are tinted. The source file is never changed: edits live in
+  gridsift and in **named versions** (`*.gsedit` files, offered under the
+  user's data directory but saved wherever the case keeps its work) that
+  only load onto the same bytes. Searches, counts and charts read the
+  source; an export can apply the edits, and its manifest lists every
+  changed cell with the original value's SHA-256.
 - **Status bar** — first rows time, index time, rows cached, peak RSS.
 
 ### An investigation, end to end

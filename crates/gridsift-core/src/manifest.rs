@@ -139,6 +139,9 @@ pub enum Operation {
     Redact { policy: RedactionPolicy },
     /// Derived columns appended from local datasets (identified by hash).
     Enrich { rules: Vec<EnrichRuleInfo> },
+    /// Cell edits applied from a named version; the source is untouched and
+    /// each original value is recorded by its hash.
+    Edit { edits: crate::edits::EditInfo },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

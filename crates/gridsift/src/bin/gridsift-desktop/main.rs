@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use eframe::egui::{self, Key, Modifiers};
 use gridsift_core::enrich::{EnrichRule, Provider};
+use gridsift_core::sidecar::versions_dir;
 
 use crate::document::{Document, OpenOptions, RuleChoice};
 use crate::ui::Action;
@@ -300,6 +301,44 @@ fn apply_to_document(ctx: &egui::Context, d: &mut Document, action: Action) {
         Action::AddPanel(c) => d.add_panel(c),
         Action::RemovePanel(i) => d.remove_panel(i),
         Action::PanelKind(i, kind) => d.set_panel_kind(i, kind),
+        // versions live wherever the analyst puts them; the data directory
+        // is offered, never the evidence folder
+        Action::SaveVersion => {
+            let dir = versions_dir(&d.path);
+            let _ = std::fs::create_dir_all(&dir);
+            let stem = d
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "edits".into());
+            let suggested = match &d.version_path {
+                Some(p) => p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                None => format!("{stem}-v1.gsedit"),
+            };
+            if let Some(p) = rfd::FileDialog::new()
+                .set_directory(&dir)
+                .set_file_name(suggested)
+                .add_filter("gridsift edits", &["gsedit"])
+                .save_file()
+            {
+                d.save_version(p);
+            }
+        }
+        Action::OpenVersion => {
+            let dir = versions_dir(&d.path);
+            let _ = std::fs::create_dir_all(&dir);
+            if let Some(p) = rfd::FileDialog::new()
+                .set_directory(&dir)
+                .add_filter("gridsift edits", &["gsedit"])
+                .pick_file()
+            {
+                d.load_version(p);
+            }
+        }
+        Action::DiscardEdits => d.discard_edits(),
         Action::GoTo(r) => {
             let max = d.known_rows.saturating_sub(1);
             d.pending_scroll = Some(r.min(max));

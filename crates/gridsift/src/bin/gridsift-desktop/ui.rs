@@ -10,12 +10,13 @@ use gridsift_core::enrich::Provider;
 use gridsift_core::hash::hex;
 use gridsift_core::sys::{group_thousands, human_bytes, iso8601_utc, peak_rss_bytes};
 
-use crate::document::{DockTab, Document};
+use crate::document::{CellEditor, DockTab, Document};
 use crate::jobs::{ChartKind, SelectionNode, SelectionState, TimelineView};
 use crate::theme::{
     self, AMBER, BLUE, CELL_TEXT, DIM, GREEN, HEADER_HEIGHT, HEADER_TEXT, KHAKI, RED, ROW_HEIGHT,
     ROW_NUMBER_TEXT, TEAL,
 };
+use gridsift_core::edits::MARK_NAMES;
 
 /// Rows fetched around a cache miss (biased forward: scrolling down is common).
 const FETCH_BEFORE: u64 = 64;
@@ -48,6 +49,11 @@ pub enum Action {
     NameColumns,
     /// Reopen the file with these column names and no header.
     SetNames(Vec<String>),
+    /// Save the edits as a named version (file picker).
+    SaveVersion,
+    /// Load a version of edits (file picker).
+    OpenVersion,
+    DiscardEdits,
     /// Show the dashboard (built from the profile the first time).
     Dashboard,
     /// Rebuild the dashboard from the column profile.
@@ -127,6 +133,7 @@ pub fn sidebar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                     evidence_section(ui, d, &mut actions);
                     columns_section(ui, d, &mut actions);
                     enrichment_section(ui, d, &mut actions);
+                    edits_section(ui, d, &mut actions);
                     ui.add_space(12.0);
                     let blocker = d.export_blocker();
                     let r = ui.add_enabled(
@@ -355,6 +362,61 @@ fn columns_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
     }
 }
 
+/// The analyst's edits: how many, which version, and where they go.
+fn edits_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
+    theme::section(ui, "EDITS");
+    let (cells, marks) = (d.edits.cells.len(), d.edits.marks.len());
+    let any = cells + marks > 0;
+    if !any && d.version_path.is_none() {
+        ui.label(
+            RichText::new("none — Edit in the command bar changes cells; a row number's right-click marks the row")
+                .color(DIM)
+                .size(11.0),
+        );
+    } else {
+        ui.label(RichText::new(format!("{cells} cells · {marks} marked rows")).monospace());
+        let version = d
+            .version_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned());
+        ui.horizontal(|ui| {
+            match &version {
+                Some(v) => ui.label(
+                    RichText::new(format!("version {v}"))
+                        .color(GREEN)
+                        .size(11.5),
+                ),
+                None => ui.label(RichText::new("unsaved").color(KHAKI).size(11.5)),
+            };
+            if d.edits_dirty && version.is_some() {
+                ui.label(RichText::new("· changed since").color(KHAKI).size(11.5));
+            }
+        });
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(any, egui::Button::new("Save version…").small())
+            .clicked()
+        {
+            actions.push(Action::SaveVersion);
+        }
+        if ui.small_button("Open version…").clicked() {
+            actions.push(Action::OpenVersion);
+        }
+        if any && ui.small_button("Discard").clicked() {
+            actions.push(Action::DiscardEdits);
+        }
+    });
+    ui.label(
+        RichText::new(
+            "the source is never changed: searches and counts read it; exports can apply the edits",
+        )
+        .color(DIM)
+        .size(11.0),
+    );
+}
+
 fn enrichment_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
     theme::section(ui, "ENRICHMENT");
     match &d.enrichment {
@@ -436,6 +498,21 @@ pub fn command_bar(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
                 ui.add_space(8.0);
                 // the analysis dock is open from the start; this hides and shows it
                 theme::toggle_chip(ui, &mut d.dock_open, "Analysis");
+                ui.add_space(8.0);
+                let was_editing = d.edit_mode;
+                theme::toggle_chip(ui, &mut d.edit_mode, "Edit");
+                if was_editing && !d.edit_mode {
+                    d.editing = None;
+                }
+                if d.edit_mode {
+                    ui.label(
+                        RichText::new(
+                            "click a cell to change it · right-click a row number to mark the row",
+                        )
+                        .color(DIM)
+                        .size(11.5),
+                    );
+                }
                 if let Some(e) = &d.search_ui.error {
                     ui.colored_label(RED, format!("invalid pattern: {e}"));
                 }
@@ -539,8 +616,13 @@ pub fn grid(ui: &mut egui::Ui, d: &mut Document) {
         path,
         enrichment,
         derived_names,
+        edits,
+        edit_mode,
+        editing,
+        edits_dirty,
         ..
     } = d;
+    let edit_mode = *edit_mode;
     let enrichment = enrichment.as_deref();
     let idx = index.read().expect("index lock");
     // Hold the match set for the frame: `select`/`contains` per visible row.
@@ -654,21 +736,119 @@ pub fn grid(ui: &mut egui::Ui, d: &mut Document) {
                     }
                 }
             }
+            let mark = edits.mark(r).map(|m| m.color);
             row.col(|ui| {
-                ui.label(
-                    RichText::new(group_thousands(r))
-                        .monospace()
-                        .color(if is_match { AMBER } else { ROW_NUMBER_TEXT }),
+                if let Some(m) = mark {
+                    ui.painter().rect_filled(
+                        ui.max_rect().expand2(egui::vec2(6.0, 0.0)),
+                        0.0_f32,
+                        mark_color(m).gamma_multiply(0.35),
+                    );
+                }
+                let resp = ui.add(
+                    egui::Label::new(
+                        RichText::new(group_thousands(r))
+                            .monospace()
+                            .color(if is_match { AMBER } else { ROW_NUMBER_TEXT }),
+                    )
+                    .sense(Sense::click()),
                 );
+                // marks are edits too: kept in the version, never in the file
+                resp.context_menu(|ui| {
+                    ui.label(RichText::new("mark this row").color(DIM));
+                    for (i, name) in MARK_NAMES.iter().enumerate() {
+                        let k = i as u8 + 1;
+                        if ui
+                            .button(RichText::new(*name).color(mark_color(k)))
+                            .clicked()
+                        {
+                            edits.set_mark(r, k, None);
+                            *edits_dirty = true;
+                            ui.close();
+                        }
+                    }
+                    if mark.is_some() && ui.button("clear mark").clicked() {
+                        edits.set_mark(r, 0, None);
+                        *edits_dirty = true;
+                        ui.close();
+                    }
+                });
             });
             let fields = cache.get(r);
             for c in 0..ncols {
                 row.col(|ui| {
-                    let text = fields.and_then(|f| f.get(c)).map_or("", String::as_str);
-                    let color = if c >= header.len() { GREEN } else { CELL_TEXT };
-                    ui.add(
-                        egui::Label::new(RichText::new(text).monospace().color(color)).truncate(),
-                    );
+                    if let Some(m) = mark {
+                        ui.painter().rect_filled(
+                            ui.max_rect().expand2(egui::vec2(4.0, 0.0)),
+                            0.0_f32,
+                            mark_color(m).gamma_multiply(0.12),
+                        );
+                    }
+                    let editable = edit_mode && c < header.len();
+                    let is_editing = editing
+                        .as_ref()
+                        .is_some_and(|e| e.record == r && e.column == c);
+                    if editable && is_editing {
+                        let e = editing.as_mut().expect("editing cell");
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut e.text)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(f32::INFINITY),
+                        );
+                        if e.focus {
+                            resp.request_focus();
+                            e.focus = false;
+                        }
+                        let text = e.text.clone();
+                        let (enter, esc) =
+                            ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+                        if esc {
+                            *editing = None;
+                        } else if enter || resp.lost_focus() {
+                            let was = fields.and_then(|f| f.get(c)).cloned().unwrap_or_default();
+                            edits.set_cell(r, c, text, was);
+                            *edits_dirty = true;
+                            *editing = None;
+                        }
+                        return;
+                    }
+                    let edit = edits.cell(r, c);
+                    let text: &str = match edit {
+                        Some(e) => e.value.as_str(),
+                        None => fields.and_then(|f| f.get(c)).map_or("", String::as_str),
+                    };
+                    let color = if edit.is_some() {
+                        AMBER
+                    } else if c >= header.len() {
+                        GREEN
+                    } else {
+                        CELL_TEXT
+                    };
+                    let mut label =
+                        egui::Label::new(RichText::new(text).monospace().color(color)).truncate();
+                    if editable {
+                        label = label.sense(Sense::click());
+                    }
+                    let resp = ui.add(label);
+                    let resp = match edit {
+                        Some(e) => {
+                            let rect = resp.rect;
+                            ui.painter().line_segment(
+                                [rect.left_bottom(), rect.right_bottom()],
+                                egui::Stroke::new(1.0_f32, AMBER),
+                            );
+                            resp.on_hover_text(format!("edited · was: {}", e.was))
+                        }
+                        None => resp,
+                    };
+                    if editable && resp.clicked() {
+                        *editing = Some(CellEditor {
+                            record: r,
+                            column: c,
+                            text: text.to_string(),
+                            focus: true,
+                        });
+                    }
                 });
             }
         });
@@ -739,6 +919,11 @@ pub fn dock(ctx: &egui::Context, d: &mut Document) -> Vec<Action> {
             }
         });
     actions
+}
+
+/// Colour of a row mark (1-based into the palette).
+fn mark_color(k: u8) -> egui::Color32 {
+    theme::PALETTE[(k.max(1) as usize - 1).min(5)]
 }
 
 /// "within the selection" / "all records" for an analysis result.

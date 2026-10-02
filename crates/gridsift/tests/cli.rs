@@ -227,6 +227,64 @@ fn whole_file_counts_are_served_from_the_analysis_cache_until_the_file_changes()
 }
 
 #[test]
+fn export_applies_a_version_of_edits_made_for_these_bytes() {
+    let dir = workdir();
+    let csv = dir.join("src.csv");
+    fs::write(&csv, "ip,host\n10.0.0.1,a\n10.0.0.2,b\n10.0.0.3,c\n").unwrap();
+    let size = fs::metadata(&csv).unwrap().len();
+    let edits = dir.join("first.gsedit");
+    let version = |size: u64| {
+        format!(
+            r#"{{"version":1,"name":"first","source":{{"name":"src.csv","size":{size}}},"cells":[{{"record":1,"column":1,"value":"edited","was":"b"}}],"marks":[{{"record":0,"color":2}}]}}"#
+        )
+    };
+    fs::write(&edits, version(size)).unwrap();
+    let out = dir.join("edited.csv");
+    let v = ok_json(
+        &dir,
+        &[
+            "export",
+            s(&csv),
+            "-o",
+            s(&out),
+            "--edits",
+            s(&edits),
+            "--json",
+        ],
+    );
+    assert_eq!(v["records"], 3);
+    assert_eq!(
+        fs::read_to_string(&out).unwrap(),
+        "ip,host\n10.0.0.1,a\n10.0.0.2,edited\n10.0.0.3,c\n"
+    );
+    let m: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("edited.csv.manifest.json")).unwrap()).unwrap();
+    assert_eq!(m["operations"][0]["op"], "edit");
+    assert_eq!(m["operations"][0]["edits"]["cells"][0]["name"], "host");
+    assert_eq!(m["operations"][0]["edits"]["cells"][0]["value"], "edited");
+    assert_eq!(m["operations"][0]["edits"]["marks"], 1);
+    let ver = ok_json(&dir, &["verify", s(&out), "--json"]);
+    assert_eq!(ver["ok"], true);
+    // a version made for other bytes is refused, and nothing is written
+    fs::write(&edits, version(size + 1)).unwrap();
+    let out2 = dir.join("refused.csv");
+    let err = fails(
+        &dir,
+        &[
+            "export",
+            s(&csv),
+            "-o",
+            s(&out2),
+            "--edits",
+            s(&edits),
+            "--json",
+        ],
+    );
+    assert!(err.contains("different file"), "{err}");
+    assert!(!out2.exists());
+}
+
+#[test]
 fn names_label_a_headerless_file_and_reach_the_manifest() {
     let dir = workdir();
     let csv = dir.join("bare.csv");

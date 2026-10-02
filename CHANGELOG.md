@@ -13,6 +13,14 @@ that, minor versions may change interfaces and the manifest format.
   and `cargo run` starts the application (`default-run`). The
   `gridsift-desktop` package is gone; the binary names are unchanged.
 
+### Edits and named versions
+- *Edit* in the command bar makes cells editable; a right-click on a row
+  number marks the row. Edits are an overlay — the source file is never
+  changed — saved as named versions (`*.gsedit`) that only load onto the
+  same bytes (size and SHA-256). An export can apply them (`--edits FILE`
+  on the command line); its manifest records every changed cell with the
+  column name, the new value and the SHA-256 of the original.
+
 ### Analysis cache
 - Whole-file results are kept in the user cache directory beside the index
   sidecar: the file-wide column profile and value counts (`*.gsan`) and

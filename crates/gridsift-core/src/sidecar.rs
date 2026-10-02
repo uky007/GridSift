@@ -67,6 +67,21 @@ pub fn default_analysis_path(source: &Path, dialect: Dialect) -> io::Result<Path
     analysis_path_in(&cache_root(), source, dialect)
 }
 
+/// Where the analyst's named versions of edits are offered by default: the
+/// user's data directory (work, not something derivable, so not the cache),
+/// one folder per source file name. Any other place may be chosen.
+pub fn versions_dir(source: &Path) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "source".into());
+    dirs::data_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("gridsift")
+        .join("versions")
+        .join(stem)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

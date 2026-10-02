@@ -28,6 +28,7 @@
 
 pub mod analysis;
 pub mod dialect;
+pub mod edits;
 pub mod enrich;
 pub mod export;
 pub mod frequency;

@@ -80,6 +80,8 @@ pub struct ExportOptions<'a> {
     pub redactor: Option<&'a Redactor>,
     /// Derived columns to append to every written record (and the header).
     pub enrichment: Option<&'a Enrichment>,
+    /// Cell edits to apply (before redaction and enrichment).
+    pub edits: Option<&'a crate::edits::EditSet>,
     pub cancel: Option<&'a AtomicBool>,
 }
 
@@ -93,19 +95,23 @@ impl Default for ExportOptions<'_> {
             overwrite: false,
             redactor: None,
             enrichment: None,
+            edits: None,
             cancel: None,
         }
     }
 }
 
-/// Per-record output transform: redaction of source columns, then derived
-/// columns appended from enrichment (computed from the original values, so
-/// a pseudonymised IP still yields its real country).
+/// Per-record output transform: the analyst's cell edits first, then
+/// redaction of source columns, then derived columns appended from
+/// enrichment (computed from the record as edited, before redaction, so a
+/// pseudonymised IP still yields its real country).
 struct Transform<'a> {
     redactor: Option<&'a Redactor>,
     enrichment: Option<&'a Enrichment>,
+    edits: Option<&'a crate::edits::EditSet>,
     dialect: Dialect,
     buf: Vec<u8>,
+    edited: Vec<u8>,
     derived: Vec<Vec<u8>>,
 }
 
@@ -113,27 +119,38 @@ impl<'a> Transform<'a> {
     fn new(
         redactor: Option<&'a Redactor>,
         enrichment: Option<&'a Enrichment>,
+        edits: Option<&'a crate::edits::EditSet>,
         dialect: Dialect,
     ) -> Transform<'a> {
         Transform {
             redactor,
             enrichment,
+            edits,
             dialect,
             buf: Vec::new(),
+            edited: Vec::new(),
             derived: Vec::new(),
         }
     }
 
     fn is_identity(&self) -> bool {
-        self.redactor.is_none() && self.enrichment.is_none()
+        self.redactor.is_none() && self.enrichment.is_none() && self.edits.is_none()
     }
 
-    /// Render a data record into `self.buf`. Returns `false` when the record
-    /// passes through untouched (the caller then writes `bytes` itself).
-    fn record(&mut self, bytes: &[u8]) -> bool {
+    /// Render data record `ordinal` into `self.buf`. Returns `false` when
+    /// the record passes through untouched (the caller then writes `bytes`
+    /// itself).
+    fn record(&mut self, ordinal: u64, bytes: &[u8]) -> bool {
         if self.is_identity() {
             return false;
         }
+        let edited = self
+            .edits
+            .is_some_and(|e| e.apply(ordinal, bytes, self.dialect, &mut self.edited));
+        if !edited && self.redactor.is_none() && self.enrichment.is_none() {
+            return false;
+        }
+        let bytes: &[u8] = if edited { &self.edited } else { bytes };
         self.buf.clear();
         match self.redactor {
             Some(r) => r.render(bytes, &mut self.buf),
@@ -179,10 +196,11 @@ impl<'a> Transform<'a> {
 fn emit<W: Write>(
     w: &mut Tee<W>,
     tf: &mut Transform<'_>,
+    ordinal: u64,
     bytes: &[u8],
     term: &[u8],
 ) -> io::Result<()> {
-    if tf.record(bytes) {
+    if tf.record(ordinal, bytes) {
         w.put(&tf.buf)?;
     } else {
         w.put(bytes)?;
@@ -338,7 +356,12 @@ pub fn export_pending<'s>(
     };
     let term = opts.terminator.bytes();
     let mut records = 0u64;
-    let mut tf = Transform::new(opts.redactor, opts.enrichment, index.params.dialect);
+    let mut tf = Transform::new(
+        opts.redactor,
+        opts.enrichment,
+        opts.edits,
+        index.params.dialect,
+    );
 
     let result = (|| -> io::Result<bool> {
         if opts.include_header
@@ -366,7 +389,7 @@ pub fn export_pending<'s>(
                     opts.chunk_size,
                     opts.cancel,
                     &mut |sp, bytes| {
-                        if let Err(e) = emit(&mut w, &mut tf, bytes, term) {
+                        if let Err(e) = emit(&mut w, &mut tf, sp.ordinal, bytes, term) {
                             err = Some(e);
                             return Control::Stop;
                         }
@@ -401,7 +424,7 @@ pub fn export_pending<'s>(
                             return Control::Stop;
                         }
                         if sp.ordinal >= first {
-                            if let Err(e) = emit(&mut w, &mut tf, bytes, term) {
+                            if let Err(e) = emit(&mut w, &mut tf, sp.ordinal, bytes, term) {
                                 err = Some(e);
                                 return Control::Stop;
                             }
@@ -433,7 +456,7 @@ pub fn export_pending<'s>(
                     }
                     let mut last_end = 0;
                     for r in locate_many(source, index, &batch) {
-                        emit(&mut w, &mut tf, r.raw(source), term)?;
+                        emit(&mut w, &mut tf, r.record, r.raw(source), term)?;
                         records += 1;
                         last_end = r.end;
                     }
@@ -543,7 +566,7 @@ mod tests {
     use super::*;
     use crate::hash::hex;
     use crate::index::{BuildOptions, IndexParams, build_index};
-    use crate::search::{SearchOptions, SearchQuery, SearchShared, search};
+    use crate::search::{MatchSet, SearchOptions, SearchQuery, SearchShared, search};
     use std::sync::atomic::AtomicUsize;
 
     fn workdir() -> PathBuf {
@@ -572,6 +595,47 @@ mod tests {
         crate::hash::hash_source(&s, HashSelection::SHA256, 1 << 20, None)
             .unwrap()
             .unwrap()
+    }
+
+    /// Edited records are re-rendered with their new values; every other
+    /// record keeps its exact bytes, whichever way the selection is walked.
+    #[test]
+    fn edits_rewrite_only_the_edited_records() {
+        let dir = workdir();
+        let data = b"id,text\n1,\"a,b\"\n2,plain\n3,x\n";
+        let (src, idx) = fixture(&dir, data, 1);
+        let mut edits = crate::edits::EditSet::default();
+        edits.set_cell(1, 1, "changed".into(), "plain".into());
+        let opts = ExportOptions {
+            edits: Some(&edits),
+            ..ExportOptions::default()
+        };
+        let out = dir.join("edited.csv");
+        export(&src, &idx, Selection::All, opts, &out, &mut |_, _| {}).unwrap();
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            b"id,text\n1,\"a,b\"\n2,changed\n3,x\n"
+        );
+        // by match set too
+        let mut m = MatchSet::default();
+        m.insert(1);
+        m.insert(2);
+        let opts = ExportOptions {
+            edits: Some(&edits),
+            ..ExportOptions::default()
+        };
+        let out2 = dir.join("edited-matches.csv");
+        export(
+            &src,
+            &idx,
+            Selection::Matches(&m),
+            opts,
+            &out2,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&out2).unwrap(), b"id,text\n2,changed\n3,x\n");
+        assert_eq!(fs::read(dir.join("source.csv")).unwrap(), data);
     }
 
     #[test]
