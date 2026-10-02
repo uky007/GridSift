@@ -5,52 +5,7 @@ All notable changes to gridsift are recorded here. The format follows
 [Semantic Versioning](https://semver.org/) once 1.0 is reached — before
 that, minor versions may change interfaces and the manifest format.
 
-## [Unreleased]
-
-### Packaging
-- One package, `gridsift`, now carries both binaries: `cargo install
-  gridsift` installs the desktop application and the command-line tool,
-  and `cargo run` starts the application (`default-run`). The
-  `gridsift-desktop` package is gone; the binary names are unchanged.
-
-### Edits and named versions
-- *Edit* in the command bar makes cells editable; a right-click on a row
-  number marks the row. Edits are an overlay — the source file is never
-  changed — saved as named versions (`*.gsedit`) that only load onto the
-  same bytes (size and SHA-256). An export can apply them (`--edits FILE`
-  on the command line); its manifest records every changed cell with the
-  column name, the new value and the SHA-256 of the original.
-
-### Analysis cache
-- Whole-file results are kept in the user cache directory beside the index
-  sidecar: the file-wide column profile and value counts (`*.gsan`) and
-  the timelines over all records (`*.gstl`, read only when a timeline is
-  asked for). The next open of the same bytes — same
-  size, modification time and SHA-256 — shows the dashboard and timeline
-  at once and starts no profile pass; `freq`, `timeline` and `profile`
-  report `cached`. Counts over a selection or of derived columns are
-  always recomputed, and a changed file never uses the cache.
-
-### Files without a header
-- The sniffer's reading of the first record can be overridden everywhere:
-  `--header` / `--no-header` on the desktop launch line as on the command
-  line, and a click on *header* / *no header* in the sidebar reopens the
-  file the other way. `--names a,b,c` (command line and desktop launch
-  line) and the sidebar's *name columns…* dialog name the columns of a
-  file without a header; the names resolve `-c` and are recorded in the
-  manifest of every export (`source.dialect.names`), never in the file.
-
-### Desktop (`gridsift-desktop`)
-- The analysis dock is open from the start, on *Values*, now the first tab
-  and with its own column picker; *Analysis* in the command bar hides and
-  shows it. The dashboard is built from the file-wide profile and
-  counted in the background, on screen or not, so opening it shows current
-  charts at once; the panels are counted one after another (one count's
-  memory instead of six), and a timeline the analyst moved to another
-  column is left alone by the background recount while the dashboard is
-  off screen.
-
-## [0.1.0] — 2026-10-01
+## [0.1.0] — 2026-10-02
 
 First public release.
 
@@ -88,6 +43,47 @@ First public release.
   virtual grid, analysis dock with Dashboard (charts picked from the
   column types, following the selection, click-to-filter), Timeline,
   Values and Profile tabs; export and enrichment dialogs.
+- The analysis dock is open from the start, on *Values*, now the first tab
+  and with its own column picker; *Analysis* in the command bar hides and
+  shows it. The dashboard is built from the file-wide profile and
+  counted in the background, on screen or not, so opening it shows current
+  charts at once; the panels are counted one after another (one count's
+  memory instead of six), and a timeline the analyst moved to another
+  column is left alone by the background recount while the dashboard is
+  off screen.
+
+### Packaging
+- One package, `gridsift`, now carries both binaries: `cargo install
+  gridsift` installs the desktop application and the command-line tool,
+  and `cargo run` starts the application (`default-run`). The
+  `gridsift-desktop` package is gone; the binary names are unchanged.
+
+### Edits and named versions
+- *Edit* in the command bar makes cells editable; a right-click on a row
+  number marks the row. Edits are an overlay — the source file is never
+  changed — saved as named versions (`*.gsedit`) that only load onto the
+  same bytes (size and SHA-256). An export can apply them (`--edits FILE`
+  on the command line); its manifest records every changed cell with the
+  column name, the new value and the SHA-256 of the original.
+
+### Analysis cache
+- Whole-file results are kept in the user cache directory beside the index
+  sidecar: the file-wide column profile and value counts (`*.gsan`) and
+  the timelines over all records (`*.gstl`, read only when a timeline is
+  asked for). The next open of the same bytes — same
+  size, modification time and SHA-256 — shows the dashboard and timeline
+  at once and starts no profile pass; `freq`, `timeline` and `profile`
+  report `cached`. Counts over a selection or of derived columns are
+  always recomputed, and a changed file never uses the cache.
+
+### Files without a header
+- The sniffer's reading of the first record can be overridden everywhere:
+  `--header` / `--no-header` on the desktop launch line as on the command
+  line, and a click on *header* / *no header* in the sidebar reopens the
+  file the other way. `--names a,b,c` (command line and desktop launch
+  line) and the sidebar's *name columns…* dialog name the columns of a
+  file without a header; the names resolve `-c` and are recorded in the
+  manifest of every export (`source.dialect.names`), never in the file.
 
 ### Known limitations
 - Input is treated as bytes (UTF-8 assumed for display); no UTF-16, no
@@ -95,5 +91,4 @@ First public release.
 - Measured to 10 GiB on a warm cache; the 100 GB cold-cache run is
   pending (see `docs/roadmap.md`).
 
-[Unreleased]: https://github.com/uky007/GridSift/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/uky007/GridSift/releases/tag/v0.1.0
