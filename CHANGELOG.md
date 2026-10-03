@@ -5,6 +5,15 @@ All notable changes to gridsift are recorded here. The format follows
 [Semantic Versioning](https://semver.org/) once 1.0 is reached — before
 that, minor versions may change interfaces and the manifest format.
 
+## [Unreleased]
+
+### Identity
+- The GridSift logo (`images/logo.png`) heads the README with the tagline
+  *Sift massive security datasets*; the mark is the desktop application's
+  window and dock icon (`images/icon.png`; a pre-decoded 256×256 copy is
+  compiled in). `images/social-preview.png` is the 1280×640 preview for
+  the repository.
+
 ## [0.1.1] — 2026-10-03
 
 Fixes from the review of the editing feature; no new features.
@@ -123,5 +132,6 @@ First public release.
 - Measured to 10 GiB on a warm cache; the 100 GB cold-cache run is
   pending (see `docs/roadmap.md`).
 
+[Unreleased]: https://github.com/uky007/GridSift/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/uky007/GridSift/releases/tag/v0.1.1
 [0.1.0]: https://github.com/uky007/GridSift/releases/tag/v0.1.0

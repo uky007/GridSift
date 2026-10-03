@@ -93,12 +93,23 @@ fn parse_args() -> Launch {
     l
 }
 
+/// The window / dock icon: the GridSift mark, 256×256 RGBA pre-decoded so
+/// no image decoder is needed at run time (`images/icon.png` is the source).
+fn app_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: include_bytes!("icon.rgba").to_vec(),
+        width: 256,
+        height: 256,
+    }
+}
+
 fn main() -> Result<(), eframe::Error> {
     let launch = parse_args();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("gridsift")
             .with_app_id("gridsift")
+            .with_icon(app_icon())
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([760.0, 480.0])
             .with_drag_and_drop(true),

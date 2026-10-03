@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/uky007/GridSift/main/images/logo.png" alt="GridSift" width="640">
+</p>
+<p align="center"><b>Sift massive security datasets.</b></p>
+
 # gridsift
 
 [![CI](https://github.com/uky007/GridSift/actions/workflows/ci.yml/badge.svg)](https://github.com/uky007/GridSift/actions/workflows/ci.yml)
