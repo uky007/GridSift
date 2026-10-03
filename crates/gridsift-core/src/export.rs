@@ -113,6 +113,8 @@ struct Transform<'a> {
     buf: Vec<u8>,
     edited: Vec<u8>,
     derived: Vec<Vec<u8>>,
+    /// `(record, column)` of every edit applied to a written record.
+    applied: Vec<(u64, usize)>,
 }
 
 impl<'a> Transform<'a> {
@@ -130,6 +132,7 @@ impl<'a> Transform<'a> {
             buf: Vec::new(),
             edited: Vec::new(),
             derived: Vec::new(),
+            applied: Vec::new(),
         }
     }
 
@@ -144,9 +147,20 @@ impl<'a> Transform<'a> {
         if self.is_identity() {
             return false;
         }
-        let edited = self
-            .edits
-            .is_some_and(|e| e.apply(ordinal, bytes, self.dialect, &mut self.edited));
+        let edited = match self.edits {
+            Some(e) => {
+                let cells = e.cells_for(ordinal);
+                if cells.is_empty() {
+                    false
+                } else {
+                    e.apply(ordinal, bytes, self.dialect, &mut self.edited);
+                    self.applied
+                        .extend(cells.iter().map(|c| (ordinal, c.column)));
+                    true
+                }
+            }
+            None => false,
+        };
         if !edited && self.redactor.is_none() && self.enrichment.is_none() {
             return false;
         }
@@ -220,6 +234,29 @@ pub struct ExportReport {
     pub complete: bool,
     /// The manifest written next to the output, if one was committed.
     pub manifest: Option<PathBuf>,
+    /// `(record, column)` of every cell edit applied to a written record —
+    /// what a manifest may list; edits of records outside the selection
+    /// were not applied and are not here.
+    pub edits_applied: Vec<(u64, usize)>,
+}
+
+/// The `output.content` label of a manifest: `raw-records` when every
+/// record is its exact source bytes, else `records` plus what changed them.
+pub fn content_label(edited: bool, redacted: bool, enriched: bool) -> String {
+    if !(edited || redacted || enriched) {
+        return "raw-records".into();
+    }
+    let mut s = String::from("records");
+    if edited {
+        s.push_str("-edited");
+    }
+    if redacted {
+        s.push_str("-redacted");
+    }
+    if enriched {
+        s.push_str("-enriched");
+    }
+    s
 }
 
 /// A finished export that has not been published yet: the records sit in a
@@ -503,6 +540,7 @@ pub fn export_pending<'s>(
                     elapsed: started.elapsed(),
                     complete: true,
                     manifest: None,
+                    edits_applied: std::mem::take(&mut tf.applied),
                 },
                 done: false,
             })
@@ -517,6 +555,7 @@ pub fn export_pending<'s>(
                 report: ExportReport {
                     path: out.to_path_buf(),
                     records,
+                    edits_applied: Vec::new(),
                     bytes: 0,
                     digests: Digests::default(),
                     elapsed: started.elapsed(),
@@ -611,11 +650,12 @@ mod tests {
             ..ExportOptions::default()
         };
         let out = dir.join("edited.csv");
-        export(&src, &idx, Selection::All, opts, &out, &mut |_, _| {}).unwrap();
+        let rep = export(&src, &idx, Selection::All, opts, &out, &mut |_, _| {}).unwrap();
         assert_eq!(
             fs::read(&out).unwrap(),
             b"id,text\n1,\"a,b\"\n2,changed\n3,x\n"
         );
+        assert_eq!(rep.edits_applied, [(1, 1)]);
         // by match set too
         let mut m = MatchSet::default();
         m.insert(1);
@@ -625,7 +665,7 @@ mod tests {
             ..ExportOptions::default()
         };
         let out2 = dir.join("edited-matches.csv");
-        export(
+        let rep = export(
             &src,
             &idx,
             Selection::Matches(&m),
@@ -635,6 +675,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read(&out2).unwrap(), b"id,text\n2,changed\n3,x\n");
+        assert_eq!(rep.edits_applied, [(1, 1)]);
+        // an edit of a record outside the selection is not applied, so a
+        // manifest built from the report cannot mention it
+        let mut only_two = MatchSet::default();
+        only_two.insert(2);
+        let opts = ExportOptions {
+            edits: Some(&edits),
+            ..ExportOptions::default()
+        };
+        let out3 = dir.join("edited-other.csv");
+        let rep = export(
+            &src,
+            &idx,
+            Selection::Matches(&only_two),
+            opts,
+            &out3,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&out3).unwrap(), b"id,text\n3,x\n");
+        assert!(rep.edits_applied.is_empty());
+        assert_eq!(content_label(false, false, false), "raw-records");
+        assert_eq!(content_label(true, true, false), "records-edited-redacted");
+        assert_eq!(content_label(false, false, true), "records-enriched");
         assert_eq!(fs::read(dir.join("source.csv")).unwrap(), data);
     }
 

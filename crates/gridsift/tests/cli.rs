@@ -232,13 +232,17 @@ fn export_applies_a_version_of_edits_made_for_these_bytes() {
     let csv = dir.join("src.csv");
     fs::write(&csv, "ip,host\n10.0.0.1,a\n10.0.0.2,b\n10.0.0.3,c\n").unwrap();
     let size = fs::metadata(&csv).unwrap().len();
+    let sha = ok_json(&dir, &["hash", s(&csv), "--json"])["sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let edits = dir.join("first.gsedit");
-    let version = |size: u64| {
+    let version = |size: u64, sha: &str, header: bool| {
         format!(
-            r#"{{"version":1,"name":"first","source":{{"name":"src.csv","size":{size}}},"cells":[{{"record":1,"column":1,"value":"edited","was":"b"}}],"marks":[{{"record":0,"color":2}}]}}"#
+            r#"{{"version":2,"name":"first","source":{{"name":"src.csv","size":{size},"sha256":"{sha}","dialect":{{"delimiter":",","quote":"\"","has_header":{header}}}}},"cells":[{{"record":1,"column":1,"value":"edited","was":"b"}}],"marks":[{{"record":0,"color":2}}]}}"#
         )
     };
-    fs::write(&edits, version(size)).unwrap();
+    fs::write(&edits, version(size, &sha, true)).unwrap();
     let out = dir.join("edited.csv");
     let v = ok_json(
         &dir,
@@ -263,25 +267,84 @@ fn export_applies_a_version_of_edits_made_for_these_bytes() {
     assert_eq!(m["operations"][0]["edits"]["cells"][0]["name"], "host");
     assert_eq!(m["operations"][0]["edits"]["cells"][0]["value"], "edited");
     assert_eq!(m["operations"][0]["edits"]["marks"], 1);
+    assert_eq!(m["output"]["content"], "records-edited");
     let ver = ok_json(&dir, &["verify", s(&out), "--json"]);
     assert_eq!(ver["ok"], true);
-    // a version made for other bytes is refused, and nothing is written
-    fs::write(&edits, version(size + 1)).unwrap();
-    let out2 = dir.join("refused.csv");
-    let err = fails(
+
+    // the manifest lists only edits of written records, and never the
+    // value of a column the same export redacts
+    let out_sel = dir.join("selected.csv");
+    ok_json(
         &dir,
         &[
             "export",
             s(&csv),
             "-o",
-            s(&out2),
+            s(&out_sel),
             "--edits",
             s(&edits),
+            "-s",
+            "10.0.0.3",
             "--json",
         ],
     );
-    assert!(err.contains("different file"), "{err}");
-    assert!(!out2.exists());
+    let m: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("selected.csv.manifest.json")).unwrap()).unwrap();
+    let edit_op = m["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["op"] == "edit")
+        .unwrap();
+    assert_eq!(edit_op["edits"]["cells"].as_array().unwrap().len(), 0);
+    assert_eq!(m["output"]["content"], "raw-records");
+    let out_mask = dir.join("masked.csv");
+    ok_json(
+        &dir,
+        &[
+            "export",
+            s(&csv),
+            "-o",
+            s(&out_mask),
+            "--edits",
+            s(&edits),
+            "--redact",
+            "host=mask",
+            "--json",
+        ],
+    );
+    let manifest = fs::read_to_string(dir.join("masked.csv.manifest.json")).unwrap();
+    assert!(!manifest.contains("\"edited\""), "{manifest}");
+    let m: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    assert!(
+        m["operations"][0]["edits"]["cells"][0]
+            .get("value")
+            .is_none()
+    );
+    assert_eq!(m["output"]["content"], "records-edited-redacted");
+
+    // other bytes, or the same bytes read without a header, are refused and nothing is written
+    for (name, body, what) in [
+        ("size", version(size + 1, &sha, true), "different file"),
+        ("header", version(size, &sha, false), "parser settings"),
+    ] {
+        fs::write(&edits, body).unwrap();
+        let out2 = dir.join(format!("refused-{name}.csv"));
+        let err = fails(
+            &dir,
+            &[
+                "export",
+                s(&csv),
+                "-o",
+                s(&out2),
+                "--edits",
+                s(&edits),
+                "--json",
+            ],
+        );
+        assert!(err.contains(what), "{name}: {err}");
+        assert!(!out2.exists());
+    }
 }
 
 #[test]

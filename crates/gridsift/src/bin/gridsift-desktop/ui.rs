@@ -1,6 +1,7 @@
 //! The panels of the main window. Panels only draw and collect [`Action`]s;
 //! the app applies them after the frame so borrows stay simple.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use eframe::egui::{self, Align, Key, RichText, Sense};
@@ -49,6 +50,10 @@ pub enum Action {
     NameColumns,
     /// Reopen the file with these column names and no header.
     SetNames(Vec<String>),
+    /// Open this file (a drop or a recent file).
+    OpenPath(PathBuf),
+    /// Close the application (after the unsaved-edits check).
+    Quit,
     /// Save the edits as a named version (file picker).
     SaveVersion,
     /// Load a version of edits (file picker).
@@ -395,9 +400,16 @@ fn edits_section(ui: &mut egui::Ui, d: &Document, actions: &mut Vec<Action>) {
         });
     }
     ui.horizontal(|ui| {
-        if ui
-            .add_enabled(any, egui::Button::new("Save version…").small())
-            .clicked()
+        let r = ui.add_enabled(
+            d.can_save_version(),
+            egui::Button::new("Save version…").small(),
+        );
+        if r.on_disabled_hover_text(if any {
+            "available once the file's SHA-256 is known"
+        } else {
+            "nothing to save yet"
+        })
+        .clicked()
         {
             actions.push(Action::SaveVersion);
         }
@@ -620,9 +632,11 @@ pub fn grid(ui: &mut egui::Ui, d: &mut Document) {
         edit_mode,
         editing,
         edits_dirty,
+        params,
         ..
     } = d;
     let edit_mode = *edit_mode;
+    let dialect = params.dialect;
     let enrichment = enrichment.as_deref();
     let idx = index.read().expect("index lock");
     // Hold the match set for the frame: `select`/`contains` per visible row.
@@ -774,7 +788,16 @@ pub fn grid(ui: &mut egui::Ui, d: &mut Document) {
                     }
                 });
             });
-            let fields = cache.get(r);
+            // the row as the export would write it: edits applied, derived
+            // columns recomputed from the edited values; `source_fields`
+            // keeps what the file holds (the `was` of a new edit)
+            let source_fields = cache.get(r);
+            let edited_row = source_fields
+                .and_then(|f| Document::row_with_edits(f, edits, r, dialect, enrichment));
+            let fields: Option<&[String]> = match &edited_row {
+                Some(row) => Some(row.as_slice()),
+                None => source_fields,
+            };
             for c in 0..ncols {
                 row.col(|ui| {
                     if let Some(m) = mark {
@@ -805,7 +828,10 @@ pub fn grid(ui: &mut egui::Ui, d: &mut Document) {
                         if esc {
                             *editing = None;
                         } else if enter || resp.lost_focus() {
-                            let was = fields.and_then(|f| f.get(c)).cloned().unwrap_or_default();
+                            let was = source_fields
+                                .and_then(|f| f.get(c))
+                                .cloned()
+                                .unwrap_or_default();
                             edits.set_cell(r, c, text, was);
                             *edits_dirty = true;
                             *editing = None;
@@ -838,6 +864,9 @@ pub fn grid(ui: &mut egui::Ui, d: &mut Document) {
                                 egui::Stroke::new(1.0_f32, AMBER),
                             );
                             resp.on_hover_text(format!("edited · was: {}", e.was))
+                        }
+                        None if edited_row.is_some() && c >= header.len() => {
+                            resp.on_hover_text("derived from the edited values of this row")
                         }
                         None => resp,
                     };

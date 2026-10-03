@@ -17,8 +17,9 @@ use crate::record::{split_fields, write_field};
 use crate::source::Source;
 use crate::sys::iso8601_utc;
 
-/// Format version of the version file.
-pub const VERSION: u32 = 1;
+/// Format version of the version file. Version 1 (gridsift 0.1.0) did not
+/// record the parser settings or require a digest and is refused.
+pub const VERSION: u32 = 2;
 
 /// Row mark colours by name; `RowMark::color` is 1-based into this list.
 pub const MARK_NAMES: [&str; 6] = ["amber", "blue", "green", "coral", "violet", "teal"];
@@ -46,8 +47,33 @@ pub struct EditSet {
 pub struct EditSource {
     pub name: String,
     pub size: u64,
+    /// SHA-256 of the source, lowercase hex. Required: a version is only
+    /// ever applied to the bytes it was made for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The parser settings the file was read with. Record ordinals count
+    /// data records after the header, so the same bytes read with another
+    /// header setting (or delimiter, or quote) put every edit on another row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialect: Option<EditDialect>,
+}
+
+/// The parser settings a version was made with.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EditDialect {
+    pub delimiter: String,
+    pub quote: Option<String>,
+    pub has_header: bool,
+}
+
+impl From<Dialect> for EditDialect {
+    fn from(d: Dialect) -> Self {
+        EditDialect {
+            delimiter: (d.delimiter as char).to_string(),
+            quote: d.quote.map(|q| (q as char).to_string()),
+            has_header: d.has_header,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -70,11 +96,15 @@ pub struct RowMark {
     pub note: Option<String>,
 }
 
-/// What a manifest records about the edits applied to an export.
+/// What a manifest records about the edits applied to an export: only the
+/// cells of records that were written, and no value for a column the same
+/// export redacts — the manifest travels with the output and must not
+/// carry what the output hides.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EditInfo {
     /// Name of the version the edits came from.
     pub version: String,
+    /// The edited cells of the records written.
     pub cells: Vec<CellChange>,
     /// Marked rows in the version (marks are not part of the output).
     pub marks: u64,
@@ -87,12 +117,21 @@ pub struct CellChange {
     pub name: String,
     /// SHA-256 of the original value's bytes: verifiable, not disclosed.
     pub was_sha256: String,
-    pub value: String,
+    /// The value written; absent when the column is redacted in this export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 impl EditSet {
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty() && self.marks.is_empty()
+    }
+
+    /// The edits of one record (sorted by column; empty when it has none).
+    pub fn cells_for(&self, record: u64) -> &[CellEdit] {
+        let lo = self.cells.partition_point(|c| c.record < record);
+        let hi = lo + self.cells[lo..].partition_point(|c| c.record == record);
+        &self.cells[lo..hi]
     }
 
     pub fn cell(&self, record: u64, column: usize) -> Option<&CellEdit> {
@@ -155,8 +194,9 @@ impl EditSet {
         }
     }
 
-    /// Bind the set to its source and name it, before saving.
-    pub fn stamp(&mut self, source: &Source, sha256: Option<String>, name: String) {
+    /// Bind the set to its source — the bytes (size and SHA-256) and the
+    /// parser settings they were read with — and name it, before saving.
+    pub fn stamp(&mut self, source: &Source, sha256: String, dialect: Dialect, name: String) {
         self.version = VERSION;
         self.name = name;
         self.saved_at = Some(iso8601_utc(
@@ -171,18 +211,34 @@ impl EditSet {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             size: source.len(),
-            sha256,
+            sha256: Some(sha256),
+            dialect: Some(dialect.into()),
         };
     }
 
-    /// The set was made for these bytes: same size, and the same SHA-256
-    /// when both sides know it.
-    pub fn matches_source(&self, size: u64, sha256: Option<&str>) -> bool {
-        self.source.size == size
-            && match (&self.source.sha256, sha256) {
-                (Some(a), Some(b)) => a == b,
-                _ => true,
-            }
+    /// Whether the set may be applied to a file of `size` bytes with digest
+    /// `sha256`, read with `dialect`; the error says what differs. Both
+    /// digests must be known: a version is never applied on size alone.
+    pub fn check(&self, size: u64, sha256: Option<&str>, dialect: Dialect) -> Result<(), String> {
+        let Some(own) = &self.source.sha256 else {
+            return Err("the version carries no digest of its source and cannot be trusted".into());
+        };
+        let Some(sha256) = sha256 else {
+            return Err("the SHA-256 of this file is not known yet; wait for it".into());
+        };
+        if self.source.size != size || own != sha256 {
+            return Err(
+                "the version was made for a different file (size or SHA-256 differ)".into(),
+            );
+        }
+        if self.source.dialect.as_ref() != Some(&EditDialect::from(dialect)) {
+            return Err(
+                "the version was made with other parser settings (header, delimiter or quote), \
+                 so its row numbers would not match"
+                    .into(),
+            );
+        }
+        Ok(())
     }
 
     pub fn load(path: &Path) -> io::Result<EditSet> {
@@ -223,12 +279,10 @@ impl EditSet {
     /// `false` when the record has none (the caller keeps the source bytes).
     /// Edited records are re-rendered field by field, quoted as needed.
     pub fn apply(&self, record: u64, bytes: &[u8], dialect: Dialect, out: &mut Vec<u8>) -> bool {
-        let lo = self.cells.partition_point(|c| c.record < record);
-        let hi = lo + self.cells[lo..].partition_point(|c| c.record == record);
-        if lo == hi {
+        let edits = self.cells_for(record);
+        if edits.is_empty() {
             return false;
         }
-        let edits = &self.cells[lo..hi];
         let mut fields = Vec::new();
         split_fields(bytes, dialect.delimiter, dialect.quote, &mut fields);
         let width = fields.len().max(edits.last().map_or(0, |e| e.column + 1));
@@ -246,13 +300,20 @@ impl EditSet {
         true
     }
 
-    /// What a manifest records; `names` gives the column names.
-    pub fn info(&self, names: &[String]) -> EditInfo {
+    /// What a manifest records: the cells in `applied` (what the export
+    /// wrote, as `(record, column)`), named by `names`, with the value left
+    /// out for columns `hidden` says the export redacts.
+    pub fn info_applied(
+        &self,
+        applied: &[(u64, usize)],
+        names: &[String],
+        hidden: &dyn Fn(usize) -> bool,
+    ) -> EditInfo {
         EditInfo {
             version: self.name.clone(),
-            cells: self
-                .cells
+            cells: applied
                 .iter()
+                .filter_map(|&(record, column)| self.cell(record, column))
                 .map(|c| CellChange {
                     record: c.record,
                     column: c.column,
@@ -261,7 +322,7 @@ impl EditSet {
                         .cloned()
                         .unwrap_or_else(|| format!("col{}", c.column)),
                     was_sha256: hex(&Sha256::digest(c.was.as_bytes())),
-                    value: c.value.clone(),
+                    value: (!hidden(c.column)).then(|| c.value.clone()),
                 })
                 .collect(),
             marks: self.marks.len() as u64,
@@ -329,32 +390,57 @@ mod tests {
         let src_path = dir.join("src.csv");
         fs::write(&src_path, "a,b\n1,2\n3,4\n").unwrap();
         let src = Source::open(&src_path).unwrap();
+        let d = Dialect::default();
         let mut e = EditSet::default();
         e.set_cell(1, 0, "30".into(), "3".into());
+        e.set_cell(1, 1, "40".into(), "4".into());
         e.set_mark(0, 4, None);
-        e.stamp(&src, Some("ab".into()), "first".into());
+        e.stamp(&src, "ab".into(), d, "first".into());
         let path = dir.join("versions").join("first.gsedit");
         e.save_for(&src, &path).unwrap();
         let back = EditSet::load(&path).unwrap();
         assert_eq!(back, e);
         assert_eq!(back.name, "first");
         assert!(back.saved_at.is_some());
-        assert!(back.matches_source(src.len(), Some("ab")));
-        assert!(back.matches_source(src.len(), None));
-        assert!(!back.matches_source(src.len() + 1, Some("ab")));
-        assert!(!back.matches_source(src.len(), Some("cd")));
+        // bound to the bytes and to the parser settings
+        assert!(back.check(src.len(), Some("ab"), d).is_ok());
+        assert!(back.check(src.len(), None, d).is_err(), "no digest yet");
+        assert!(back.check(src.len() + 1, Some("ab"), d).is_err());
+        assert!(back.check(src.len(), Some("cd"), d).is_err());
+        let no_header = Dialect {
+            has_header: false,
+            ..d
+        };
+        assert!(
+            back.check(src.len(), Some("ab"), no_header)
+                .unwrap_err()
+                .contains("parser settings")
+        );
+        let mut undigested = back.clone();
+        undigested.source.sha256 = None;
+        assert!(undigested.check(src.len(), Some("ab"), d).is_err());
         // never over the evidence
         assert!(e.save_for(&src, &src_path).is_err());
         assert_eq!(fs::read(&src_path).unwrap(), b"a,b\n1,2\n3,4\n");
-        // the manifest record names the column and hashes the original
-        let info = e.info(&["a".into(), "b".into()]);
+        // the manifest record covers the cells written, named, the original
+        // hashed, and no value for a redacted column
+        let names = ["a".to_string(), "b".to_string()];
+        let info = e.info_applied(&[(1, 0), (1, 1)], &names, &|c| c == 1);
         assert_eq!(info.version, "first");
         assert_eq!(info.marks, 1);
+        assert_eq!(info.cells.len(), 2);
         assert_eq!(info.cells[0].name, "a");
-        assert_eq!(info.cells[0].value, "30");
+        assert_eq!(info.cells[0].value.as_deref(), Some("30"));
         assert_eq!(info.cells[0].was_sha256, hex(&Sha256::digest(b"3")));
-        // another format version is refused
-        fs::write(&path, br#"{"version":99,"cells":[]}"#).unwrap();
-        assert!(EditSet::load(&path).is_err());
+        assert_eq!(info.cells[1].value, None, "column b is redacted");
+        let none = e.info_applied(&[], &names, &|_| false);
+        assert!(none.cells.is_empty(), "nothing written, nothing listed");
+        assert_eq!(e.cells_for(1).len(), 2);
+        assert!(e.cells_for(0).is_empty());
+        // other format versions are refused, including 0.1.0's
+        for v in [1, 99] {
+            fs::write(&path, format!(r#"{{"version":{v},"cells":[]}}"#)).unwrap();
+            assert!(EditSet::load(&path).is_err());
+        }
     }
 }

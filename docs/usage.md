@@ -208,12 +208,21 @@ and `--names a,b,c` read the file the way the command line would.
   one, type, Enter (Escape cancels; typing the original value back removes
   the edit). A right-click on a row number marks the row in one of six
   colours. Edited cells are amber with their original value on hover;
-  marked rows are tinted. The source file is never changed: edits live in
-  gridsift and in **named versions** (`*.gsedit` files, offered under the
-  user's data directory but saved wherever the case keeps its work) that
-  only load onto the same bytes. Searches, counts and charts read the
-  source; an export can apply the edits, and its manifest lists every
-  changed cell with the original value's SHA-256.
+  marked rows are tinted; the derived columns of an edited row are
+  recomputed from the edited values, as an export would write them. The
+  source file is never changed: edits live in gridsift and in **named
+  versions** (`*.gsedit`, offered under the user's data directory but
+  saved wherever the case keeps its work). A version is bound to the
+  file's SHA-256 and to the parser settings it was read with, so it is
+  saved once the digest is known and loads only onto the same bytes read
+  the same way. Leaving unsaved edits behind — opening another file,
+  switching the header, loading a version, closing the window — asks
+  first. Searches, counts and charts read the source; an export can apply
+  the edits, and its manifest lists the changed cells of the written
+  records with the original value's SHA-256, leaving the value out for a
+  column the export redacts. Mind that a `*.gsedit` file holds the old and
+  new values in clear: it is working material of the case, not something
+  to hand on with a redacted export.
 - **Status bar** — first rows time, index time, rows cached, peak RSS.
 
 ### An investigation, end to end

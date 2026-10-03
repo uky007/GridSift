@@ -5,6 +5,38 @@ All notable changes to gridsift are recorded here. The format follows
 [Semantic Versioning](https://semver.org/) once 1.0 is reached — before
 that, minor versions may change interfaces and the manifest format.
 
+## [0.1.1] — 2026-10-03
+
+Fixes from the review of the editing feature; no new features.
+
+### Edits and named versions
+- A version is bound to the file's SHA-256 **and** to the parser settings
+  it was read with (header, delimiter, quote): saving waits for the
+  digest, and a version is never applied on size alone or to the same
+  bytes read the other way. Version files are format 2; files written by
+  0.1.0 are refused.
+- The manifest's `edit` operation lists only the edited cells of the
+  records written, and leaves the value out for a column the same export
+  redacts, so a redacted export's manifest no longer carries what the
+  output hides. `output.content` says `records-edited…` when edits were
+  applied (it said `raw-records`).
+- Leaving unsaved edits behind — opening another file, switching the
+  header, naming columns, loading a version, discarding, closing the
+  window — asks first: save as a version, discard, or cancel.
+- The grid shows an edited row the way an export writes it: derived
+  (enrichment) columns are recomputed from the edited values.
+- After naming the columns of a header-less file, the sidebar's header
+  button switches the header reading back on (it was ignored).
+
+### Command line
+- `export --edits` applies the same binding checks and says why a version
+  cannot be applied; `verify` marks edit values redacted in the output.
+
+### Documentation
+- `docs/manifest.md` documents the `edit` operation and the `content`
+  labels; the usage and installation notes say what version files and
+  caches hold, and where they go.
+
 ## [0.1.0] — 2026-10-02
 
 First public release.
@@ -91,4 +123,5 @@ First public release.
 - Measured to 10 GiB on a warm cache; the 100 GB cold-cache run is
   pending (see `docs/roadmap.md`).
 
+[0.1.1]: https://github.com/uky007/GridSift/releases/tag/v0.1.1
 [0.1.0]: https://github.com/uky007/GridSift/releases/tag/v0.1.0

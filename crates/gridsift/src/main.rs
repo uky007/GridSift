@@ -18,7 +18,7 @@ use gridsift_core::analysis::AnalysisCache;
 use gridsift_core::dialect::sniff;
 use gridsift_core::edits::EditSet;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
-use gridsift_core::export::{ExportOptions, Selection, Terminator, export_pending};
+use gridsift_core::export::{ExportOptions, Selection, Terminator, content_label, export_pending};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyShared, frequency};
 use gridsift_core::hash::{MultiHasher, hash_source, hex};
 use gridsift_core::index::{BuildOptions, IndexParams, SparseIndex, bootstrap, build_index};
@@ -1714,37 +1714,24 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
         Terminator::Lf
     };
     // the analyst's cell edits, from a version made for these very bytes
+    // read with these very parser settings
     let edits = match &o.edits {
         Some(p) => {
             let set = EditSet::load(p).with_context(|| format!("reading edits {}", p.display()))?;
             let sha = idx.digests.sha256.map(|d| hex(&d));
-            if !set.matches_source(src.len(), sha.as_deref()) {
-                bail!(
-                    "the edits in {} were made for a different file (size or digest differ)",
-                    p.display()
-                );
+            if let Err(why) = set.check(src.len(), sha.as_deref(), idx.params.dialect) {
+                bail!("the edits in {} cannot be applied: {why}", p.display());
             }
-            let names: Vec<String> = header
-                .as_ref()
-                .map(|h| h.iter().map(|f| field_str(f).into_owned()).collect())
-                .unwrap_or_default();
-            // after the selection steps, before redaction and enrichment
-            let pos = operations
-                .iter()
-                .take_while(|op| {
-                    matches!(op, Operation::Search { .. } | Operation::TimeRange { .. })
-                })
-                .count();
-            operations.insert(
-                pos,
-                Operation::Edit {
-                    edits: set.info(&names),
-                },
-            );
             Some(set)
         }
         None => None,
     };
+    // the edit operation is recorded after the export, from what was
+    // actually written; it goes after the selection steps
+    let edit_pos = operations
+        .iter()
+        .take_while(|op| matches!(op, Operation::Search { .. } | Operation::TimeRange { .. }))
+        .count();
     let opts = ExportOptions {
         include_header: !o.omit_header,
         terminator,
@@ -1767,6 +1754,22 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
     .with_context(|| format!("exporting to {}", o.output.display()))?;
     pb.finish_and_clear();
     let rep = pending.report().clone();
+    if let Some(set) = &edits {
+        let names: Vec<String> = header
+            .as_ref()
+            .map(|h| h.iter().map(|f| field_str(f).into_owned()).collect())
+            .unwrap_or_default();
+        let redacted: std::collections::HashSet<usize> = redactor
+            .as_ref()
+            .map(|r| r.policy().rules.iter().map(|x| x.column).collect())
+            .unwrap_or_default();
+        operations.insert(
+            edit_pos,
+            Operation::Edit {
+                edits: set.info_applied(&rep.edits_applied, &names, &|c| redacted.contains(&c)),
+            },
+        );
+    }
 
     // manifest next to the output, committed before the output itself
     let out_path = std::path::absolute(&o.output).unwrap_or_else(|_| o.output.clone());
@@ -1788,13 +1791,11 @@ fn cmd_export(file: &Path, args: &DialectArgs, o: ExportArgs, json: bool) -> Res
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             format: "csv".into(),
-            content: match (redactor.is_some(), enrichment.is_some()) {
-                (false, false) => "raw-records",
-                (true, false) => "records-redacted",
-                (false, true) => "records-enriched",
-                (true, true) => "records-redacted-enriched",
-            }
-            .into(),
+            content: content_label(
+                !rep.edits_applied.is_empty(),
+                redactor.is_some(),
+                enrichment.is_some(),
+            ),
             header: !o.omit_header && idx.header.is_some(),
             terminator: String::from_utf8_lossy(terminator.bytes()).into_owned(),
             records: rep.records,
@@ -1994,11 +1995,15 @@ fn cmd_verify(
                     );
                     for c in &edits.cells {
                         println!(
-                            "              record {} {} (column {}) → {:?} (was sha256 {}…)",
+                            "              record {} {} (column {}) → {} (was sha256 {}…)",
                             c.record,
                             c.name,
                             c.column,
-                            c.value,
+                            c.value
+                                .as_deref()
+                                .map_or("(redacted in this output)".to_string(), |v| format!(
+                                    "{v:?}"
+                                )),
                             &c.was_sha256[..16]
                         );
                     }

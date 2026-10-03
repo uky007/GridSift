@@ -120,6 +120,7 @@ Each entry has an `op` tag:
 | `time_range` | `column`, `name`, `from`, `to` (ISO 8601 UTC, `to` exclusive), `matches`, `reference_year` (the year assumed for timestamp formats that carry none, such as syslog) | the records whose timestamp column is in range, within the previous step |
 | `enrich` | `rules[]`: `column`, `name`, `provider` (`geoip`, `domain`, `lookup`), `derived` names, `dataset` (`name`, `kind`, `size`, `sha256`, `records`; for MMDB `database_type` and `built`; for the PSL its `version`; for a lookup table `lookup` = `key`, `values`, and the `delimiter` / `quote` / `header` it was parsed with) | derived columns appended to the output, identified by the exact dataset and join settings that produced them |
 | `redact` | `policy.rules[]`: `column`, `name`, `method` and its parameters | how columns were rewritten; for `hmac` only a fingerprint of the key (SHA-256 of the key, truncated) is recorded, never the key |
+| `edit` | `edits`: `version` (the name of the saved version the edits came from), `cells[]`: `record`, `column`, `name`, `was_sha256` (SHA-256 of the original value's bytes), `value` (the value written; **absent** for a column the same export redacts), `marks` (marked rows in the version; marks are not part of the output) | the analyst's cell edits applied to the written records — only those: an edit of a record outside the selection was not applied and is not listed. The original values are recorded by hash so the manifest can prove what changed without disclosing it; note that a hash of a short, guessable value does not hide it |
 
 Selection steps (`search`, `time_range`) are nested: each applies within
 the matches of the previous one, and `matches` is the count after that
@@ -134,7 +135,7 @@ of a full pass.
 |---|---|
 | `path`, `name` | where the file was written |
 | `format` | `csv` |
-| `content` | `raw-records` (each record's bytes exactly as in the source, followed by `terminator`), `records-redacted`, `records-enriched` or `records-redacted-enriched` |
+| `content` | `raw-records` (each record's bytes exactly as in the source, followed by `terminator`), or `records` with what changed them, in this order: `-edited` (cell edits were applied to at least one written record), `-redacted`, `-enriched` — e.g. `records-edited`, `records-redacted-enriched`, `records-edited-redacted-enriched` |
 | `header` | whether the header record was written |
 | `terminator` | `"\n"` or `"\r\n"` |
 | `records`, `size` | what was written |

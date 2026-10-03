@@ -80,7 +80,14 @@ timelines) in the user cache directory:
 | Windows | `%LOCALAPPDATA%\gridsift\{index,analysis}\` |
 
 Both are bound to the source's size and modification time (and to its
-SHA-256 once known) and are ignored when the file changes. `gridsift index --index PATH` writes it
+SHA-256 once known) and are ignored when the file changes. They hold
+values derived from the evidence — the profile's example values, the top
+values of columns, timeline buckets — so a case that must not leave
+traces on the analyst's machine should remove them when it closes.
+Versions of edits (`*.gsedit`, old and new cell values in clear) are
+offered under the user's data directory (`~/.local/share/gridsift/versions/`,
+`~/Library/Application Support/gridsift/versions/`,
+`%APPDATA%\gridsift\versions\`) and may be saved anywhere else. `gridsift index --index PATH` writes it
 somewhere else instead. Exports and manifests are written only where the
 analyst asks for them.
 

@@ -12,12 +12,13 @@ use gridsift_core::analysis::AnalysisCache;
 use gridsift_core::dialect::sniff;
 use gridsift_core::edits::EditSet;
 use gridsift_core::enrich::{EnrichRule, Enrichment, GeoIpDb, GeoProvider, LookupTable, Provider};
-use gridsift_core::export::{ExportOptions, Selection, export_pending};
+use gridsift_core::export::{ExportOptions, Selection, content_label, export_pending};
 use gridsift_core::frequency::{FrequencyOptions, FrequencyResult, FrequencyShared, frequency};
 use gridsift_core::hash::{Digests, HashSelection, hash_source, hex};
 use gridsift_core::index::{IndexParams, SparseIndex, bootstrap};
 use gridsift_core::manifest::{Manifest, Operation, OutputInfo, SelectionInfo, SourceInfo};
 use gridsift_core::reader::header_fields;
+use gridsift_core::record::write_field;
 use gridsift_core::redact::{
     DEFAULT_HMAC_LENGTH, DEFAULT_MASK, RedactMethod, RedactRule, Redactor,
 };
@@ -477,7 +478,9 @@ impl Document {
         if let Some(h) = opts.header {
             dialect.has_header = h;
         }
-        if opts.names.is_some() {
+        // names describe a file without a header, unless the analyst asked
+        // for the header reading explicitly (switching back after naming)
+        if opts.names.is_some() && opts.header != Some(true) {
             dialect.has_header = false;
         }
         let params = IndexParams {
@@ -1696,14 +1699,21 @@ impl Document {
             .and_then(|i| i.digests.sha256.map(|d| hex(&d)))
     }
 
-    /// Save the edits as a version named after the file's stem.
+    /// Save the edits as a version named after the file's stem. A version
+    /// is bound to the file's SHA-256, so it waits for the digest.
     pub fn save_version(&mut self, path: PathBuf) {
+        let Some(sha) = self.source_sha256() else {
+            self.status = Some(
+                "the SHA-256 of the file is not known yet; save the version once it is".into(),
+            );
+            return;
+        };
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "version".into());
         self.edits
-            .stamp(&self.source, self.source_sha256(), name.clone());
+            .stamp(&self.source, sha, self.params.dialect, name.clone());
         match self.edits.save_for(&self.source, &path) {
             Ok(()) => {
                 self.version_path = Some(path);
@@ -1714,14 +1724,28 @@ impl Document {
         }
     }
 
-    /// Load a version, if it was made for these bytes.
-    pub fn load_version(&mut self, path: PathBuf) {
+    /// Can a version be saved now (the digest is known) and is there
+    /// anything to save?
+    pub fn can_save_version(&self) -> bool {
+        !self.edits.is_empty() && self.source_sha256().is_some()
+    }
+
+    /// Load a version made for these bytes and these parser settings.
+    /// Unsaved edits are kept unless `replace_unsaved` (the caller asked).
+    pub fn load_version(&mut self, path: PathBuf, replace_unsaved: bool) {
+        if self.edits_dirty && !replace_unsaved {
+            self.status =
+                Some("unsaved edits: save them as a version or discard them first".into());
+            return;
+        }
         match EditSet::load(&path) {
             Ok(set) => {
-                if !set.matches_source(self.source.len(), self.source_sha256().as_deref()) {
-                    self.status = Some(
-                        "this version was made for a different file (size or digest differ)".into(),
-                    );
+                if let Err(why) = set.check(
+                    self.source.len(),
+                    self.source_sha256().as_deref(),
+                    self.params.dialect,
+                ) {
+                    self.status = Some(format!("version not loaded: {why}"));
                     return;
                 }
                 self.status = Some(format!(
@@ -1737,6 +1761,48 @@ impl Document {
             }
             Err(e) => self.status = Some(format!("version not loaded: {e}")),
         }
+    }
+
+    /// A row as the export would write it: the source fields with the
+    /// record's edits applied and, when enrichment is on, the derived
+    /// columns recomputed from the edited values (the row cache holds the
+    /// ones computed from the source). `None` when the record has no edits.
+    pub fn row_with_edits(
+        source_fields: &[String],
+        edits: &EditSet,
+        record: u64,
+        dialect: gridsift_core::Dialect,
+        enrichment: Option<&Enrichment>,
+    ) -> Option<Vec<String>> {
+        let cells = edits.cells_for(record);
+        if cells.is_empty() {
+            return None;
+        }
+        let source_width = source_fields.len() - enrichment.map_or(0, |e| e.derived_names().len());
+        let mut row: Vec<String> = source_fields[..source_width].to_vec();
+        for c in cells {
+            if c.column >= row.len() {
+                row.resize(c.column + 1, String::new());
+            }
+            row[c.column] = c.value.clone();
+        }
+        if let Some(e) = enrichment {
+            let mut bytes = Vec::new();
+            for (i, f) in row.iter().enumerate() {
+                if i > 0 {
+                    bytes.push(dialect.delimiter);
+                }
+                write_field(f.as_bytes(), dialect.delimiter, dialect.quote, &mut bytes);
+            }
+            let mut derived = Vec::new();
+            e.compute(&bytes, &mut derived);
+            row.extend(
+                derived
+                    .iter()
+                    .map(|v| String::from_utf8_lossy(v).into_owned()),
+            );
+        }
+        Some(row)
     }
 
     pub fn discard_edits(&mut self) {
@@ -1795,6 +1861,10 @@ impl Document {
         let names = self.names.clone();
         let edits = (apply_edits && !self.edits.is_empty()).then(|| self.edits.clone());
         let column_names = self.header.clone();
+        let redacted: std::collections::HashSet<usize> = rules.iter().map(|r| r.column).collect();
+        // the edit operation is recorded after the export, from what was
+        // written; it goes right after the selection steps
+        let edit_pos = operations.len();
         let handle = std::thread::Builder::new()
             .name("gridsift-export".into())
             .spawn(move || {
@@ -1812,11 +1882,6 @@ impl Document {
                     )
                 };
                 let mut operations = operations;
-                if let Some(e) = &edits {
-                    operations.push(Operation::Edit {
-                        edits: e.info(&column_names),
-                    });
-                }
                 if let Some(e) = &enrichment {
                     operations.push(Operation::Enrich { rules: e.info() });
                 }
@@ -1845,6 +1910,16 @@ impl Document {
                         PathBuf::new(),
                     ));
                 }
+                if let Some(e) = &edits {
+                    operations.insert(
+                        edit_pos,
+                        Operation::Edit {
+                            edits: e.info_applied(&rep.edits_applied, &column_names, &|c| {
+                                redacted.contains(&c)
+                            }),
+                        },
+                    );
+                }
                 let out_path = std::path::absolute(&out2).unwrap_or_else(|_| out2.clone());
                 let mut source_info = SourceInfo::from_source(
                     &source,
@@ -1867,13 +1942,11 @@ impl Document {
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_default(),
                         format: "csv".into(),
-                        content: match (redactor.is_some(), enrichment.is_some()) {
-                            (false, false) => "raw-records",
-                            (true, false) => "records-redacted",
-                            (false, true) => "records-enriched",
-                            (true, true) => "records-redacted-enriched",
-                        }
-                        .into(),
+                        content: content_label(
+                            !rep.edits_applied.is_empty(),
+                            redactor.is_some(),
+                            enrichment.is_some(),
+                        ),
                         header: index.header.is_some(),
                         terminator: "\n".into(),
                         records: rep.records,
@@ -2169,7 +2242,7 @@ mod tests {
     /// edited records while the manifest lists each change.
     #[test]
     fn edits_overlay_the_source_and_travel_through_versions_and_exports() {
-        let (_, mut d) = open(&fixture("hosts.csv", HOSTS));
+        let (ctx, mut d) = open(&fixture("hosts.csv", HOSTS));
         d.edits.set_cell(
             1,
             1,
@@ -2190,6 +2263,7 @@ mod tests {
             .unwrap()
             .join("versions")
             .join("first.gsedit");
+        assert!(d.can_save_version(), "the digest is known once indexed");
         d.save_version(vpath.clone());
         assert!(!d.edits_dirty && vpath.is_file());
         assert_eq!(d.edits.name, "first");
@@ -2199,17 +2273,41 @@ mod tests {
             "source untouched"
         );
 
+        // unsaved edits are never replaced silently
         let (_, mut again) = open(&d.path.clone());
-        again.load_version(vpath.clone());
+        again.edits.set_mark(0, 1, None);
+        again.edits_dirty = true;
+        again.load_version(vpath.clone(), false);
+        assert_eq!(again.edits.marks.len(), 1, "kept");
+        assert!(again.edits_dirty);
+        again.load_version(vpath.clone(), true);
         assert_eq!(again.edits, d.edits);
+        // other bytes, or the same bytes read the other way, are refused
         let other = fixture(
             "other.csv",
             "ts,host,alternate_host\n2026-09-21T14:13:20Z,x,y\n",
         );
         let (_, mut o) = open(&other);
-        o.load_version(vpath);
+        o.load_version(vpath.clone(), false);
         assert!(o.edits.is_empty(), "made for other bytes");
+        let ctx2 = egui::Context::default();
+        let opts = OpenOptions {
+            header: Some(false),
+            ..opts_for(&d.path)
+        };
+        let mut flipped = Document::open_with(&ctx2, &d.path, opts).unwrap();
+        settle(&mut flipped);
+        flipped.load_version(vpath, false);
+        assert!(flipped.edits.is_empty(), "other parser settings");
+        assert!(
+            flipped
+                .status
+                .as_deref()
+                .is_some_and(|s| s.contains("parser settings"))
+        );
 
+        // an export applies the edits of the written records; the manifest
+        // lists exactly those, and says the output is edited
         let out = d.path.parent().unwrap().join("edited.csv");
         d.start_export(out.clone(), vec![], None, false, true);
         settle(&mut d);
@@ -2231,6 +2329,114 @@ mod tests {
             "edited.example.com"
         );
         assert_eq!(m["operations"][0]["edits"]["marks"], 1);
+        assert_eq!(m["output"]["content"], "records-edited");
+
+        // a selection without the edited record: nothing applied, nothing listed
+        select_host(&ctx, &mut d, "beta.example.com");
+        let out2 = d.path.parent().unwrap().join("edited-beta.csv");
+        d.start_export(out2.clone(), vec![], None, false, true);
+        settle(&mut d);
+        let m2: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(Manifest::path_for(&out2)).unwrap()).unwrap();
+        let edit_op = m2["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["op"] == "edit")
+            .expect("edit operation recorded");
+        assert_eq!(edit_op["edits"]["cells"].as_array().unwrap().len(), 0);
+        assert_eq!(m2["output"]["content"], "raw-records");
+    }
+
+    /// A redacted column's edited value stays out of the manifest.
+    #[test]
+    fn redacted_edit_values_stay_out_of_the_manifest() {
+        let (_, mut d) = open(&fixture("hosts.csv", HOSTS));
+        d.edits.set_cell(
+            1,
+            1,
+            "secret.example.com".into(),
+            "alpha.example.com".into(),
+        );
+        let rule = RedactRule {
+            column: 1,
+            name: "host".into(),
+            method: RedactMethod::Mask {
+                replacement: "[masked]".into(),
+            },
+        };
+        let out = d.path.parent().unwrap().join("masked.csv");
+        d.start_export(out.clone(), vec![rule], None, false, true);
+        settle(&mut d);
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(!text.contains("secret.example.com") && text.contains("[masked]"));
+        let manifest = std::fs::read_to_string(Manifest::path_for(&out)).unwrap();
+        assert!(!manifest.contains("secret.example.com"), "{manifest}");
+        let m: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        let cell = &m["operations"][0]["edits"]["cells"][0];
+        assert_eq!(cell["name"], "host");
+        assert!(cell.get("value").is_none());
+        assert_eq!(m["output"]["content"], "records-edited-redacted");
+    }
+
+    /// The grid shows an edited row the way the export writes it: derived
+    /// columns follow the edited value.
+    #[test]
+    fn derived_columns_of_an_edited_row_follow_the_edit() {
+        let (_, mut d) = open(&fixture("hosts.csv", HOSTS));
+        d.enrich_ui.rules = vec![EnrichRule {
+            column: 1,
+            name: "host".into(),
+            provider: Provider::Domain,
+        }];
+        d.apply_enrichment();
+        settle(&mut d);
+        d.cache.fill_window(
+            &d.source,
+            &d.index.read().unwrap(),
+            d.enrichment.as_deref(),
+            0,
+            4,
+        );
+        let source_row = d.cache.get(1).unwrap().to_vec();
+        assert_eq!(source_row[3], "example.com");
+        d.edits
+            .set_cell(1, 1, "alpha.example.org".into(), "alpha.example.com".into());
+        let row = Document::row_with_edits(
+            &source_row,
+            &d.edits,
+            1,
+            d.params.dialect,
+            d.enrichment.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(row[1], "alpha.example.org");
+        assert_eq!(row[3], "example.org", "derived from the edited value");
+        assert!(
+            Document::row_with_edits(&source_row, &d.edits, 2, d.params.dialect, None).is_none()
+        );
+    }
+
+    /// Names describe a header-less reading, but asking for the header
+    /// explicitly wins, so the sidebar toggle works after naming columns.
+    #[test]
+    fn header_can_be_switched_back_on_after_naming_columns() {
+        let p = fixture("bare.csv", "1,10.0.0.1\n2,10.0.0.2\n");
+        let ctx = egui::Context::default();
+        let named = OpenOptions {
+            names: Some(vec!["n".into(), "ip".into()]),
+            ..opts_for(&p)
+        };
+        let d = Document::open_with(&ctx, &p, named).unwrap();
+        assert!(!d.params.dialect.has_header);
+        let back = OpenOptions {
+            header: Some(true),
+            names: Some(vec!["n".into(), "ip".into()]),
+            ..opts_for(&p)
+        };
+        let d = Document::open_with(&ctx, &p, back).unwrap();
+        assert!(d.params.dialect.has_header, "the explicit header wins");
+        assert_eq!(d.header, ["1", "10.0.0.1"]);
     }
 
     fn select_host(ctx: &egui::Context, d: &mut Document, host: &str) {
